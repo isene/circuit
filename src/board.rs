@@ -1,15 +1,16 @@
 //! The breadboard: parts and wires on a grid of cells, and the circuit
 //! they make.
 //!
-//! A part is three cells of body in a row, with a pin cell at each end
-//! (a transistor has three pins). Wires are cells too, each holding which
+//! A small part is a row of body cells with pin cells around it; a chip
+//! is a block with its inputs down the left side and outputs down the
+//! right. Wires are cells too, each holding which
 //! of its four sides it joins. A wire and a pin join when both point at
 //! each other. Where two wires cross straight over each other they do not
 //! touch, unless the cell is marked as a join.
 
 use std::collections::HashMap;
 
-use crate::sim::{Circuit, Dev, LedColor};
+use crate::sim::{Circuit, Dev, Gate, LedColor};
 
 pub const N: u8 = 1;
 pub const E: u8 = 2;
@@ -32,28 +33,82 @@ pub fn opposite(dir: u8) -> u8 {
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Kind { Battery, Resistor, Capacitor, Led, Switch, Npn }
+pub enum Kind {
+    Battery, Resistor, Capacitor, Led, Switch, Npn, Button,
+    Not, And, Or, Nand, Nor, Xor, Clock, Counter, Display, Timer,
+}
 
 impl Kind {
-    pub const ALL: [Kind; 6] = [Kind::Battery, Kind::Resistor, Kind::Capacitor, Kind::Led, Kind::Switch, Kind::Npn];
+    /// Every part, in the order the picker lists them. The first six are
+    /// also on the number keys.
+    pub const ALL: [Kind; 17] = [
+        Kind::Battery, Kind::Resistor, Kind::Capacitor, Kind::Led, Kind::Switch, Kind::Npn, Kind::Button,
+        Kind::Not, Kind::And, Kind::Or, Kind::Nand, Kind::Nor, Kind::Xor,
+        Kind::Clock, Kind::Counter, Kind::Display, Kind::Timer,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
             Kind::Battery => "battery", Kind::Resistor => "resistor", Kind::Capacitor => "capacitor",
-            Kind::Led => "LED", Kind::Switch => "switch", Kind::Npn => "transistor",
+            Kind::Led => "LED", Kind::Switch => "switch", Kind::Npn => "transistor", Kind::Button => "button",
+            Kind::Not => "NOT gate", Kind::And => "AND gate", Kind::Or => "OR gate", Kind::Nand => "NAND gate",
+            Kind::Nor => "NOR gate", Kind::Xor => "XOR gate", Kind::Clock => "clock", Kind::Counter => "counter",
+            Kind::Display => "display", Kind::Timer => "555 timer",
         }
     }
+
+    /// One line for the part picker.
+    pub fn blurb(self) -> &'static str {
+        match self {
+            Kind::Battery => "power for everything",
+            Kind::Resistor => "holds current back",
+            Kind::Capacitor => "stores charge for a while",
+            Kind::Led => "lights up with current",
+            Kind::Switch => "Space flips it",
+            Kind::Npn => "a small current steers a big one",
+            Kind::Button => "Space presses it for a moment",
+            Kind::Not => "flips a signal",
+            Kind::And => "high when both inputs are",
+            Kind::Or => "high when either input is",
+            Kind::Nand => "an AND, flipped",
+            Kind::Nor => "an OR, flipped",
+            Kind::Xor => "high when the inputs differ",
+            Kind::Clock => "ticks by itself",
+            Kind::Counter => "counts in binary, 0 to 15",
+            Kind::Display => "shows a digit, 0 to F",
+            Kind::Timer => "the classic timer chip",
+        }
+    }
+
     fn code(self) -> &'static str {
         match self {
             Kind::Battery => "battery", Kind::Resistor => "resistor", Kind::Capacitor => "capacitor",
-            Kind::Led => "led", Kind::Switch => "switch", Kind::Npn => "npn",
+            Kind::Led => "led", Kind::Switch => "switch", Kind::Npn => "npn", Kind::Button => "button",
+            Kind::Not => "not", Kind::And => "and", Kind::Or => "or", Kind::Nand => "nand", Kind::Nor => "nor",
+            Kind::Xor => "xor", Kind::Clock => "clock", Kind::Counter => "counter", Kind::Display => "display",
+            Kind::Timer => "timer",
         }
     }
+
     fn from_code(s: &str) -> Option<Kind> {
         Kind::ALL.into_iter().find(|k| k.code() == s)
     }
+
     fn default_value(self) -> f64 {
-        match self { Kind::Battery => 9.0, Kind::Resistor => 470.0, Kind::Capacitor => 10e-6, _ => 0.0 }
+        match self { Kind::Battery => 9.0, Kind::Resistor => 470.0, Kind::Capacitor => 10e-6, Kind::Clock => 1.0, _ => 0.0 }
+    }
+
+    pub fn gate(self) -> Option<Gate> {
+        Some(match self {
+            Kind::Not => Gate::Not, Kind::And => Gate::And, Kind::Or => Gate::Or,
+            Kind::Nand => Gate::Nand, Kind::Nor => Gate::Nor, Kind::Xor => Gate::Xor,
+            _ => return None,
+        })
+    }
+
+    /// Counters, displays and timers are blocks that do not turn.
+    pub fn is_chip(self) -> bool {
+        matches!(self, Kind::Counter | Kind::Display | Kind::Timer)
     }
 }
 
@@ -78,17 +133,38 @@ impl Part {
         Part { kind, x, y, orient: 0, value: kind.default_value(), color: LedColor::Red, closed: false, burnt: false }
     }
 
+    /// The body's width and height in cells.
+    pub fn size(&self) -> (i32, i32) {
+        match self.kind {
+            Kind::Counter => (5, 4),
+            Kind::Timer => (5, 3),
+            Kind::Display => (5, 5),
+            k if k.gate().is_some() || k == Kind::Clock => (4, 1),
+            _ => (3, 1),
+        }
+    }
+
     /// Pin cells, in order: a battery's + and −, an LED's anode and
-    /// cathode, a transistor's collector, base and emitter.
+    /// cathode, a transistor's collector, base and emitter, a gate's a, b
+    /// and q, a counter's clock, reset and 1 2 4 8, a display's 1 2 4 8, a
+    /// 555's trigger, threshold, discharge and output.
     pub fn pins(&self) -> Vec<(i32, i32)> {
         let (x, y) = (self.x, self.y);
-        let (left, right, top, bottom) = ((x - 1, y), (x + 3, y), (x + 1, y - 1), (x + 1, y + 1));
+        let (w, _) = self.size();
+        let (left, right, top, bottom) = ((x - 1, y), (x + w, y), (x + 1, y - 1), (x + 1, y + 1));
+        let flat = self.orient % 2 == 0;
         match self.kind {
             Kind::Npn => {
-                let base = if self.orient % 2 == 0 { left } else { right };
+                let base = if flat { left } else { right };
                 let (c, e) = if self.orient < 2 { (top, bottom) } else { (bottom, top) };
                 vec![c, base, e]
             }
+            Kind::Not => if flat { vec![left, right] } else { vec![right, left] },
+            Kind::Clock => vec![if flat { right } else { left }],
+            k if k.gate().is_some() => vec![top, bottom, if flat { right } else { left }],
+            Kind::Counter => vec![(x - 1, y), (x - 1, y + 1), (x + w, y), (x + w, y + 1), (x + w, y + 2), (x + w, y + 3)],
+            Kind::Timer => vec![(x - 1, y), (x - 1, y + 1), (x - 1, y + 2), (x + w, y)],
+            Kind::Display => (0..4).map(|k| (x - 1, y + k)).collect(),
             _ => match self.orient {
                 0 => vec![left, right],
                 1 => vec![right, left],
@@ -98,13 +174,26 @@ impl Part {
         }
     }
 
-    pub fn body(&self) -> [(i32, i32); 3] {
-        [(self.x, self.y), (self.x + 1, self.y), (self.x + 2, self.y)]
+    pub fn body(&self) -> Vec<(i32, i32)> {
+        let (w, h) = self.size();
+        (0..h).flat_map(|dy| (0..w).map(move |dx| (self.x + dx, self.y + dy))).collect()
     }
 
     /// The side of a pin that faces the body; wires join on the others.
     pub fn inward(&self, pin: (i32, i32)) -> u8 {
-        if pin.1 < self.y { S } else if pin.1 > self.y { N } else if pin.0 < self.x { E } else { W }
+        let (_, h) = self.size();
+        if pin.1 < self.y { S } else if pin.1 >= self.y + h { N } else if pin.0 < self.x { E } else { W }
+    }
+
+    /// Turn the part a quarter; gates and clocks just face the other way.
+    /// False for chips, which do not turn.
+    pub fn turn(&mut self) -> bool {
+        match self.kind {
+            k if k.is_chip() => return false,
+            k if k.gate().is_some() || k == Kind::Clock => self.orient = (self.orient + 1) % 2,
+            _ => self.orient = (self.orient + 1) % 4,
+        }
+        true
     }
 
     fn cells(&self) -> Vec<(i32, i32)> {
@@ -311,6 +400,7 @@ impl Board {
         let mut dev_part = Vec::new();
         let mut part_dev = vec![None; self.parts.len()];
         let mut ground = None;
+        let mut vhigh = None;
         for (i, p) in self.parts.iter().enumerate() {
             let Some(p) = p else { continue };
             let pin: Vec<usize> = p.pins().iter().map(|c| node_of[c]).collect();
@@ -320,20 +410,29 @@ impl Board {
             let dev = match p.kind {
                 Kind::Battery => {
                     ground.get_or_insert(pin[1]);
+                    vhigh.get_or_insert(p.value);
                     Dev::Battery { p: pin[0], n: pin[1], volts: p.value }
                 }
                 Kind::Resistor => Dev::Resistor { a: pin[0], b: pin[1], ohms: p.value * tol },
                 Kind::Capacitor => Dev::Capacitor { a: pin[0], b: pin[1], farads: p.value * tol },
                 Kind::Led => Dev::Led { a: pin[0], k: pin[1], color: p.color, burnt: p.burnt },
-                Kind::Switch => Dev::Switch { a: pin[0], b: pin[1], closed: p.closed },
+                Kind::Switch | Kind::Button => Dev::Switch { a: pin[0], b: pin[1], closed: p.closed },
                 Kind::Npn => Dev::Npn { c: pin[0], b: pin[1], e: pin[2] },
+                Kind::Not => Dev::Gate { gate: Gate::Not, a: pin[0], b: pin[0], q: pin[1] },
+                Kind::And | Kind::Or | Kind::Nand | Kind::Nor | Kind::Xor => {
+                    Dev::Gate { gate: p.kind.gate().unwrap_or(Gate::And), a: pin[0], b: pin[1], q: pin[2] }
+                }
+                Kind::Clock => Dev::Clock { q: pin[0], hz: p.value },
+                Kind::Counter => Dev::Counter { clk: pin[0], rst: pin[1], q: [pin[2], pin[3], pin[4], pin[5]] },
+                Kind::Display => Dev::Display { d: [pin[0], pin[1], pin[2], pin[3]] },
+                Kind::Timer => Dev::Timer { trig: pin[0], thres: pin[1], dis: pin[2], out: pin[3] },
             };
             part_dev[i] = Some(devs.len());
             dev_part.push(i);
             devs.push(dev);
         }
         Net {
-            circuit: Circuit { nodes: number.len().max(1), ground: ground.unwrap_or(0), devs },
+            circuit: Circuit { nodes: number.len().max(1), ground: ground.unwrap_or(0), vhigh, devs },
             dev_part,
             part_dev,
             node_of,
@@ -405,6 +504,7 @@ const E12: [f64; 12] = [1.0, 1.2, 1.5, 1.8, 2.2, 2.7, 3.3, 3.9, 4.7, 5.6, 6.8, 8
 pub fn step_value(kind: Kind, value: f64, up: bool) -> f64 {
     let list: Vec<f64> = match kind {
         Kind::Battery => vec![1.5, 3.0, 4.5, 6.0, 9.0, 12.0],
+        Kind::Clock => vec![0.5, 1.0, 2.0, 5.0, 10.0],
         Kind::Resistor => (1..6).flat_map(|d| E12.iter().map(move |v| v * 10f64.powi(d))).chain([1e6]).collect(),
         Kind::Capacitor => [1.0, 2.2, 4.7, 10.0, 22.0, 47.0, 100.0, 220.0, 470.0, 1000.0].iter().map(|v| v * 1e-6).collect(),
         _ => return value,
@@ -432,6 +532,8 @@ pub fn code(kind: Kind, v: f64) -> String {
         Kind::Capacitor if v < 100e-6 => ee(v * 1e6, 'µ'),
         Kind::Capacitor if v < 1e-3 => format!("m{:.0}", v * 1e5),
         Kind::Capacitor => ee(v * 1e3, 'm'),
+        Kind::Clock if v < 1.0 => " ½Hz".into(),
+        Kind::Clock => format!("{:>2.0}Hz", v),
         _ => String::new(),
     }
 }
@@ -448,6 +550,7 @@ pub fn pretty(kind: Kind, v: f64) -> String {
         Kind::Resistor if v < 1e6 => format!("{} kΩ", num(v / 1e3)),
         Kind::Resistor => format!("{} MΩ", num(v / 1e6)),
         Kind::Capacitor => format!("{} µF", num(v * 1e6)),
+        Kind::Clock => format!("{} Hz", num(v)),
         _ => String::new(),
     }
 }
@@ -469,8 +572,27 @@ mod tests {
         assert_eq!(code(Kind::Battery, 9.0), "9V0");
         assert_eq!(code(Kind::Battery, 12.0), "12V");
         assert_eq!(pretty(Kind::Resistor, 4700.0), "4.7 kΩ");
+        assert_eq!(code(Kind::Clock, 10.0), "10Hz");
+        assert_eq!(code(Kind::Clock, 0.5), " ½Hz");
         assert_eq!(step_value(Kind::Resistor, 470.0, true), 560.0);
         assert!((step_value(Kind::Capacitor, 10e-6, false) - 4.7e-6).abs() < 1e-12);
+    }
+
+    #[test]
+    fn chips_have_inputs_left_and_outputs_right() {
+        let c = Part::new(Kind::Counter, 10, 10);
+        assert_eq!(c.pins(), vec![(9, 10), (9, 11), (15, 10), (15, 11), (15, 12), (15, 13)]);
+        assert_eq!(c.inward((9, 11)), E);
+        assert_eq!(c.inward((15, 13)), W);
+        assert_eq!(c.body().len(), 20);
+        let g = Part::new(Kind::Nand, 10, 10);
+        assert_eq!(g.pins(), vec![(11, 9), (11, 11), (14, 10)]);
+        assert_eq!(g.inward((11, 11)), N);
+        let mut b = Board::default();
+        b.place(Part::new(Kind::Display, 0, 0)).unwrap();
+        assert!(b.place(Part::new(Kind::Resistor, 2, 3)).is_none(), "the display's body is taken");
+        let back = Board::from_text(&b.to_text());
+        assert_eq!(back.parts.iter().flatten().next().map(|p| p.kind), Some(Kind::Display));
     }
 
     #[test]

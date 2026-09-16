@@ -2,8 +2,9 @@
 //!
 //! Parts and wires sit on a grid. Power on and a solver works out every
 //! voltage and current, a millisecond at a time: LEDs glow, burn out, or
-//! blink. Challenges teach one idea each. When the circuit settles the
-//! solver stops, and nothing runs between key presses.
+//! blink. Logic chips count and show digits. Challenges teach one idea
+//! each. When the circuit settles the solver stops, and nothing runs
+//! between key presses.
 
 mod board;
 mod lessons;
@@ -11,13 +12,13 @@ mod sim;
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use board::{Board, Cell, Kind, Net, Part, E, JOIN, N, S, W};
 use crust::cursor::Cursor;
 use crust::{style, Crust, Input, Pane};
 use lessons::{Progress, LESSONS};
-use sim::{Dev, LedColor, Sim, LED_FULL};
+use sim::{Dev, LedColor, Logic, Sim, LED_FULL};
 
 /// Width of the panel on the right.
 const INFO_W: usize = 40;
@@ -36,8 +37,9 @@ fn main() {
         println!();
         println!("Usage: circuit");
         println!();
-        println!("Place batteries, resistors, capacitors, LEDs, switches and transistors,");
-        println!("wire them up and power on. Three challenges teach LEDs, transistors and a blinker.");
+        println!("Place batteries, resistors, capacitors, LEDs, switches, transistors, logic gates,");
+        println!("clocks, counters, displays and 555 timers, wire them up and power on. Eight");
+        println!("challenges run from lighting an LED to a stopwatch.");
         println!("Boards are kept in ~/.circuit/. Press ? inside for every key.");
         return;
     }
@@ -92,6 +94,8 @@ struct App {
     look: Vec<u8>,
     /// A key was pressed: the board must be rebuilt.
     dirty: bool,
+    /// A pressed button and when it lets go.
+    release: Option<(usize, Instant)>,
 }
 
 impl App {
@@ -107,6 +111,7 @@ impl App {
             progress: Progress::default(),
             done: (0..=LESSONS.len()).map(|i| done.split_whitespace().any(|d| d == i.to_string())).collect(),
             note: None, reset_armed: false, shown: Default::default(), rows: Vec::new(), look: Vec::new(), dirty: true,
+            release: None,
         };
         app.changed();
         app
@@ -151,7 +156,12 @@ impl App {
         let steps = now.duration_since(self.last).as_millis().clamp(1, 250) as usize;
         self.last = now;
         let mut moved = 0.0f64;
-        for _ in 0..steps { moved = moved.max(sim.step(&self.net.circuit, DT)); }
+        let checking = self.mode > 0 && !self.done[self.mode];
+        let mut met = false;
+        for _ in 0..steps {
+            moved = moved.max(sim.step(&self.net.circuit, DT));
+            if checking && !met { met = self.progress.check(self.mode, &self.net.circuit, sim); }
+        }
         for (d, &p) in self.net.dev_part.iter().enumerate() {
             if !sim.burnt[d] { continue; }
             if let Some(Some(part)) = self.board.parts.get_mut(p) {
@@ -162,7 +172,7 @@ impl App {
                 }
             }
         }
-        if self.mode > 0 && !self.done[self.mode] && self.progress.check(self.mode, &self.net.circuit, sim) {
+        if met {
             self.done[self.mode] = true;
             self.note = Some(if self.mode < LESSONS.len() {
                 "Well done! Press n for the next challenge.".into()
@@ -171,7 +181,13 @@ impl App {
             });
             self.save();
         }
-        self.steady = moved < SETTLED;
+        if let Some((i, at)) = self.release {
+            if now >= at {
+                self.release = None;
+                self.set_closed(i, false);
+            }
+        }
+        self.steady = moved < SETTLED && !self.net.circuit.has_clock() && self.release.is_none();
         if let Some(v) = self.probe() {
             self.trace.push_back(v);
             while self.trace.len() > TRACE_N { self.trace.pop_front(); }
@@ -209,7 +225,22 @@ impl App {
             "x" | "DEL" => {
                 if self.board.delete(self.cur) { self.changed(); }
             }
-            "o" => self.edit(|p| p.orient = (p.orient + 1) % 4, true),
+            "o" => {
+                if self.board.part_at(self.cur).and_then(|i| self.board.part(i)).is_some_and(|p| p.kind.is_chip()) {
+                    self.note = Some("Chips don't turn: inputs stay on the left, outputs on the right.".into());
+                } else {
+                    self.edit(|p| { p.turn(); }, true);
+                }
+            }
+            "a" => {
+                if let Some(kind) = self.pick() {
+                    if self.board.place(Part::new(kind, self.cur.0 - 1, self.cur.1)).is_some() {
+                        self.changed();
+                    } else {
+                        self.note = Some("No room here for that part.".into());
+                    }
+                }
+            }
             "+" | "=" | "-" => {
                 let up = k != "-";
                 self.edit(move |p| match p.kind {
@@ -291,18 +322,61 @@ impl App {
         self.changed();
     }
 
-    /// Space on a switch: flip it without restarting the circuit.
+    /// Space on a switch flips it; on a button it presses it for a moment.
+    /// Neither restarts the circuit.
     fn flip_switch(&mut self) {
         let Some(i) = self.board.part_at(self.cur) else { return };
-        let Some(Some(p)) = self.board.parts.get_mut(i) else { return };
-        if p.kind != Kind::Switch { return; }
-        p.closed = !p.closed;
-        let now = p.closed;
+        match self.board.part(i).map(|p| (p.kind, p.closed)) {
+            Some((Kind::Switch, closed)) => self.set_closed(i, !closed),
+            Some((Kind::Button, _)) if self.power => {
+                self.set_closed(i, true);
+                self.release = Some((i, Instant::now() + Duration::from_millis(300)));
+            }
+            Some((Kind::Button, _)) => self.note = Some("Power on first: a button only holds while you press.".into()),
+            _ => {}
+        }
+    }
+
+    fn set_closed(&mut self, i: usize, now: bool) {
+        if let Some(Some(p)) = self.board.parts.get_mut(i) { p.closed = now; }
         if let Some(d) = self.net.part_dev[i] {
             if let Dev::Switch { closed, .. } = &mut self.net.circuit.devs[d] { *closed = now; }
         }
         self.steady = false;
         self.last = Instant::now();
+        self.dirty = true;
+    }
+
+    /// The part picker: every part with a line about it.
+    fn pick(&mut self) -> Option<Kind> {
+        let (cols, rows) = Crust::terminal_size();
+        let n = Kind::ALL.len();
+        let (w, h) = (52.min(cols.saturating_sub(4)), (n as u16 + 4).min(rows.saturating_sub(2)));
+        let mut p = Pane::new((cols - w) / 2 + 1, (rows - h) / 2 + 1, w, h, 252, 235);
+        p.border = true;
+        p.scroll = false;
+        p.wrap = false;
+        let mut sel = 0usize;
+        let chosen = loop {
+            let mut text = vec![format!("  {}", style::fg("Add a part   ↑ ↓ choose   Enter place   Esc", 245)), String::new()];
+            for (k, kind) in Kind::ALL.iter().enumerate() {
+                let line = format!(" {:<11} {}", kind.name(), kind.blurb());
+                text.push(if k == sel { style::styled(&format!("▶{line}"), Some(16), Some(214), "") } else { format!(" {line}") });
+            }
+            p.set_text(&text.join("\n"));
+            p.full_refresh();
+            match Input::getchr(None).as_deref() {
+                Some("UP") | Some("k") => sel = (sel + n - 1) % n,
+                Some("DOWN") | Some("j") => sel = (sel + 1) % n,
+                Some("ENTER") => break Some(Kind::ALL[sel]),
+                Some("ESC") | Some("a") | Some("q") => break None,
+                _ => {}
+            }
+        };
+        Crust::clear_screen();
+        self.shown = Default::default();
+        self.rows.clear();
+        chosen
     }
 
     fn help(&mut self) {
@@ -320,14 +394,25 @@ impl App {
         self.rows.clear();
     }
 
-    /// The voltage the probe reads: a wire's node, or across a part.
+    /// The voltage the probe reads: a wire's node, across a two-pin part,
+    /// or a logic part's first pin.
     fn probe(&self) -> Option<f64> {
         let sim = self.sim.as_ref()?;
         if let Some(&n) = self.net.node_of.get(&self.cur) { return Some(sim.v[n]); }
         let p = self.board.part(self.board.part_at(self.cur)?)?;
         let pins = p.pins();
-        let (a, b) = if p.kind == Kind::Npn { (pins[0], pins[2]) } else { (pins[0], pins[1]) };
-        Some(sim.v[self.net.node_of[&a]] - sim.v[self.net.node_of[&b]])
+        let at = |c: &(i32, i32)| self.net.node_of.get(c).map(|&n| sim.v[n]);
+        match p.kind {
+            Kind::Npn => Some(at(&pins[0])? - at(&pins[2])?),
+            k if pins.len() == 2 && k.gate().is_none() => Some(at(&pins[0])? - at(&pins[1])?),
+            _ => at(&pins[0]),
+        }
+    }
+
+    /// A logic part's state, while the power is on.
+    fn logic_of(&self, i: usize) -> Option<Logic> {
+        let sim = self.sim.as_ref().filter(|_| self.power)?;
+        self.net.part_dev.get(i).copied().flatten().map(|d| sim.logic[d])
     }
 
     fn vmax(&self) -> f64 {
@@ -399,6 +484,9 @@ impl App {
             if let Some(part) = self.board.part(p).filter(|x| x.kind == Kind::Led) {
                 out.push(if part.burnt { 255 } else { led_color(part.color, (sim.current[d] / LED_FULL).clamp(0.0, 1.0)) });
             }
+            let l = sim.logic[d];
+            out.push(l.out.iter().enumerate().fold(0, |acc, (k, &b)| acc | (b as u8) << k));
+            out.push(l.value);
         }
         out
     }
@@ -418,7 +506,7 @@ impl App {
         let mut facts = vec![style::bold("circuit"), title, power];
         if self.pen { facts.push(style::fg("drawing wire", 214)); }
         if self.moving.is_some() { facts.push(style::fg("moving part", 213)); }
-        let keys = "1-6 add   w wire   p power   n challenge   ? help   q quit";
+        let keys = "1-6 add   a all parts   w wire   p power   n challenge   ? help   q quit";
         let version = format!("v{}", env!("CARGO_PKG_VERSION"));
         let width = |s: &str| crust::strip_ansi(s).chars().count();
         let right = width(keys) + 3 + width(&version) + 1;
@@ -480,15 +568,24 @@ impl App {
                     Kind::Battery if *k == 0 => ('+', 196, None, true),
                     Kind::Battery => ('−', 81, None, true),
                     Kind::Npn => (['c', 'b', 'e'][*k], wire_color(), None, true),
+                    Kind::Not => (['a', 'q'][*k], wire_color(), None, true),
+                    Kind::Clock => ('q', wire_color(), None, true),
+                    kind if kind.gate().is_some() => (['a', 'b', 'q'][*k], wire_color(), None, true),
                     _ => (BOX[(*m | p.inward(at)) as usize & 15], wire_color(), None, false),
                 }
             }
             Some(Cell::Body(i)) => {
                 let Some(p) = self.board.part(*i) else { return ('?', 196, None, false) };
-                let idx = (at.0 - p.x).clamp(0, 2) as usize;
+                let (col, row) = ((at.0 - p.x).max(0) as usize, (at.1 - p.y).max(0) as usize);
+                if p.kind.is_chip() { return self.chip_cell(*i, p, col, row); }
                 let chars: Vec<char> = self.body_text(*i, p).chars().collect();
-                let ch = chars.get(idx).copied().unwrap_or(' ');
+                let ch = chars.get(col).copied().unwrap_or(' ');
+                let high = self.logic_of(*i).is_some_and(|l| l.out[0]);
                 match p.kind {
+                    Kind::Button => (ch, 229, None, true),
+                    Kind::Clock => (ch, if high { 231 } else { 183 }, Some(if high { 127 } else { 53 }), true),
+                    Kind::Not | Kind::And | Kind::Or | Kind::Nand | Kind::Nor | Kind::Xor => (ch, if high { 46 } else { 157 }, Some(23), true),
+                    Kind::Counter | Kind::Display | Kind::Timer => (ch, 252, Some(238), false),
                     Kind::Battery => (ch, 16, Some(178), true),
                     Kind::Resistor => (ch, 230, Some(94), false),
                     Kind::Capacitor => (ch, 195, Some(24), false),
@@ -504,8 +601,55 @@ impl App {
         }
     }
 
+    /// One cell of a chip: labels down the edges, the name, and what it holds.
+    fn chip_cell(&self, i: usize, p: &Part, col: usize, row: usize) -> (char, u8, Option<u8>, bool) {
+        let logic = self.logic_of(i);
+        let label = |c: char, lit: bool| (c, if lit { 46 } else { 250 }, Some(238), lit);
+        match p.kind {
+            Kind::Counter => {
+                if col == 0 { return label(['>', 'r', ' ', ' '][row.min(3)], logic.is_some_and(|l| row < 2 && l.ins[row])); }
+                if col == 4 { return label(['1', '2', '4', '8'][row.min(3)], logic.is_some_and(|l| l.out[row.min(3)])); }
+                let text = match row {
+                    0 => "CNT".to_string(),
+                    2 => logic.map(|l| format!("{:>2} ", l.value)).unwrap_or_default(),
+                    _ => String::new(),
+                };
+                let ch = text.chars().nth(col - 1).unwrap_or(' ');
+                (ch, if row == 0 { 230 } else { 231 }, Some(238), true)
+            }
+            Kind::Timer => {
+                if col == 0 { return label(['t', 'h', 'd'][row.min(2)], false); }
+                if col == 4 { return label(if row == 0 { 'o' } else { ' ' }, row == 0 && logic.is_some_and(|l| l.out[0])); }
+                let ch = if row == 1 { ['5', '5', '5'][col - 1] } else { ' ' };
+                (ch, 230, Some(238), true)
+            }
+            _ => {
+                // The display: input labels, then a digit three cells wide and five tall.
+                // Each cell lights when any of the seven segments (bit 0 top, clockwise, bit 6 middle) touching it is on.
+                if col == 0 { return label(['1', '2', '4', '8', ' '][row.min(4)], logic.is_some_and(|l| row < 4 && l.ins[row])); }
+                if col == 4 { return (' ', 250, Some(232), false); }
+                const SEGMENTS: [u8; 16] = [0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F, 0x77, 0x7C, 0x39, 0x5E, 0x79, 0x71];
+                const TOUCH: [[u8; 3]; 5] = [[0x21, 0x01, 0x03], [0x20, 0, 0x02], [0x70, 0x40, 0x46], [0x10, 0, 0x04], [0x18, 0x08, 0x0C]];
+                let touch = TOUCH[row.min(4)][col - 1];
+                if touch == 0 { return (' ', 236, Some(232), false); }
+                let lit = logic.is_some_and(|l| SEGMENTS[l.value as usize & 15] & touch != 0);
+                let ch = '█';
+                (ch, if lit { 196 } else { 236 }, Some(232), lit)
+            }
+        }
+    }
+
     fn body_text(&self, _i: usize, p: &Part) -> String {
         match p.kind {
+            Kind::Button => if p.closed { "─●─".into() } else { "─○─".into() },
+            Kind::Not => "NOT ".into(),
+            Kind::And => "AND ".into(),
+            Kind::Or => " OR ".into(),
+            Kind::Nand => "NAND".into(),
+            Kind::Nor => "NOR ".into(),
+            Kind::Xor => "XOR ".into(),
+            Kind::Clock => board::code(p.kind, p.value),
+            Kind::Counter | Kind::Display | Kind::Timer => String::new(),
             Kind::Battery | Kind::Resistor | Kind::Capacitor => format!("{:<3}", board::code(p.kind, p.value)),
             Kind::Npn => "NPN".into(),
             Kind::Led if p.burnt => " ✕ ".into(),
@@ -556,8 +700,11 @@ impl App {
         if self.power && self.trace.len() > 1 {
             let vmax = self.vmax();
             const TICKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-            let bars: String = self.trace.iter().map(|&v| TICKS[((v / vmax).clamp(0.0, 1.0) * 7.0).round() as usize]).collect();
-            l.push(format!("{} {}", style::fg(&bars, 46), style::fg(&format!("0–{} V", vmax), 245)));
+            let scale = format!("0–{} V", vmax);
+            let room = w.saturating_sub(scale.chars().count() + 1);
+            let bars: String = self.trace.iter().skip(self.trace.len().saturating_sub(room))
+                .map(|&v| TICKS[((v / vmax).clamp(0.0, 1.0) * 7.0).round() as usize]).collect();
+            l.push(format!("{} {}", style::fg(&bars, 46), style::fg(&scale, 245)));
         }
         if let Some(n) = &self.note {
             l.push(String::new());
@@ -567,6 +714,7 @@ impl App {
         l.push(style::fg("Parts", 245));
         l.push("1 battery    2 resistor   3 capacitor".into());
         l.push("4 LED        5 switch     6 transistor".into());
+        l.extend(wrap("a picks any part: gates, clock, counter, display, 555, button.", w));
         l.iter().map(|s| format!("  {s}")).collect::<Vec<_>>().join("\n")
     }
 
@@ -580,7 +728,7 @@ impl App {
                 (Some(Cell::Wire(_)), Some(s), Some(&n)) => vec![format!("Wire at {}", volts(s.v[n]))],
                 (Some(Cell::Wire(_)), _, _) => vec!["Wire. x deletes it.".into()],
                 _ if self.pen => vec!["Move to draw a wire. w or Esc stops.".into()],
-                _ => vec!["Empty. Press 1 to 6 to add a part here, or w to draw a wire.".into()],
+                _ => vec!["Empty. Press 1 to 6 or a to add a part here, or w to draw a wire.".into()],
             };
         };
         let Some(p) = self.board.part(i) else { return vec![] };
@@ -632,8 +780,47 @@ impl App {
                     out.push(format!("Collector {}, base {}", amps(s.current[d]), amps(s.base[d])));
                 }
             }
+            Kind::Button => {
+                out.push("Button: Space presses it for a moment.".into());
+                if let (Some(s), Some(d)) = (sim, d) { out.push(format!("Carrying {}", amps(s.current[d]))); }
+            }
+            kind @ (Kind::Not | Kind::And | Kind::Or | Kind::Nand | Kind::Nor | Kind::Xor) => {
+                let rule = match kind {
+                    Kind::Not => "q is high when a is low",
+                    Kind::And => "q is high only when a and b are both high",
+                    Kind::Or => "q is high when a or b is high",
+                    Kind::Nand => "q is low only when a and b are both high",
+                    Kind::Nor => "q is low when a or b is high",
+                    _ => "q is high when a and b differ",
+                };
+                out.push(format!("{}: {rule}.", kind.name()));
+                if let Some(l) = self.logic_of(i) {
+                    let hl = |b: bool| if b { "high" } else { "low" };
+                    out.push(if kind == Kind::Not {
+                        format!("a {}, q {}", hl(l.ins[0]), hl(l.out[0]))
+                    } else {
+                        format!("a {}, b {}, q {}", hl(l.ins[0]), hl(l.ins[1]), hl(l.out[0]))
+                    });
+                }
+            }
+            Kind::Clock => {
+                out.push(format!("Clock, {}: q goes high and low by itself.", board::pretty(p.kind, p.value)));
+                out.push("+ and − change the speed.".into());
+            }
+            Kind::Counter => {
+                out.push("Counter: adds one each time > goes high; a high r puts it back to 0. 1, 2, 4 and 8 show the count in binary.".into());
+                if let Some(l) = self.logic_of(i) { out.push(format!("Count {} = {}", l.value, binary_sum(l.value))); }
+            }
+            Kind::Display => {
+                out.push("Display: shows the digit its inputs 1, 2, 4 and 8 add up to, 0 to F.".into());
+                if let Some(l) = self.logic_of(i) { out.push(format!("Showing {:X} = {}", l.value, binary_sum(l.value))); }
+            }
+            Kind::Timer => {
+                out.push("555 timer: o goes high when t drops below a third of the battery, and low when h rises above two thirds. While o is low, d pulls down.".into());
+                if let Some(l) = self.logic_of(i) { out.push(format!("o {}", if l.out[0] { "high" } else { "low" })); }
+            }
         }
-        out.push("o turns it, m moves it, x deletes it.".into());
+        out.push(if p.kind.is_chip() { "m moves it, x deletes it." } else { "o turns it, m moves it, x deletes it." }.into());
         out
     }
 }
@@ -644,13 +831,15 @@ const HELP: &str = "
   Arrows / h j k l   move the cursor
   1 2 3 4 5 6        add a battery, resistor, capacitor,
                      LED, switch or transistor
+  a                  pick any part: gates, clock, counter,
+                     display, 555 timer, button
   w                  draw a wire: move to lay it, w stops
   .                  join two wires that cross (they don't touch)
   x                  delete the wire or part under the cursor
-  o                  turn a part
+  o                  turn a part (chips don't turn)
   m                  move a part: arrows carry it, m drops it
   + -                change a value or an LED's colour
-  Space              flip a switch
+  Space              flip a switch, press a button
   r                  replace a burnt-out LED
   p                  power on or off
   n N                next or previous challenge
@@ -659,6 +848,8 @@ const HELP: &str = "
 
   Wires glow green with voltage, brighter for higher,
   and red below zero. LEDs glow with their current.
+  Chips take power from the first battery; an input
+  reads high above 60% of it and low below 40%.
   A part's value is printed the way it is marked:
   4k7 is 4.7 kΩ, 10µ is 10 µF, 9V0 is 9 V.
 
@@ -682,6 +873,12 @@ fn led_color(c: LedColor, glow: f64) -> u8 {
         LedColor::Blue => [17, 18, 20, 27, 33],
     };
     ramp[((glow * 4.0).round() as usize).min(4)]
+}
+
+/// A count as the powers of two it is made of: 13 is "8 + 4 + 1".
+fn binary_sum(v: u8) -> String {
+    let parts: Vec<String> = [8, 4, 2, 1].iter().filter(|&&b| v & b != 0).map(|b| b.to_string()).collect();
+    if parts.is_empty() { "0".into() } else { parts.join(" + ") }
 }
 
 fn volts(v: f64) -> String {
@@ -742,5 +939,7 @@ mod tests {
         assert_eq!(wrap("one two three four", 9), vec!["one two", "three", "four"]);
         assert_eq!(amps(0.0151), "15.1 mA");
         assert_eq!(amps(0.00082), "820 µA");
+        assert_eq!(binary_sum(13), "8 + 4 + 1");
+        assert_eq!(binary_sum(0), "0");
     }
 }

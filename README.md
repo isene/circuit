@@ -7,10 +7,13 @@
 ![Rust](https://img.shields.io/badge/language-Rust-f74c00) ![License](https://img.shields.io/badge/license-Unlicense-green) ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-blue) ![Stay Amazing](https://img.shields.io/badge/Stay-Amazing-important)
 
 Put batteries, resistors, capacitors, LEDs, switches and transistors on a
-grid, wire them up and power on. Every voltage and current is worked out
-as you watch: wires glow green with voltage, LEDs light up with their
-current, and an LED with no resistor burns out. Challenges teach one idea
-at a time, and each one ticks itself off when your circuit works.
+grid, wire them up and power on. Then move on to logic chips: gates, a
+clock, a counter, a digit display and the 555 timer.
+
+Every voltage and current is worked out as you watch: wires glow green
+with voltage, LEDs light up with their current, and an LED with no
+resistor burns out. Challenges teach one idea at a time, and each one
+ticks itself off when your circuit works.
 
 Part of the [Fe₂O₃ suite](https://isene.github.io/fe2o3/). Built on
 [crust](https://github.com/isene/crust).
@@ -25,6 +28,18 @@ Part of the [Fe₂O₃ suite](https://isene.github.io/fe2o3/). Built on
    big LED current on and off.
 3. **Make it blink**: two transistors and two capacitors take turns, a
    third of a second each.
+4. **Logic gates**: two switches and an AND gate, and the LED lights only
+   when both are on.
+5. **Count in binary**: a clock drives a counter, and four LEDs count
+   from 0 to 15.
+6. **Numbers on a display**: the counter's four outputs become a digit,
+   0 to F.
+7. **The 555 timer**: the classic chip blinks an LED with two resistors
+   and a capacitor.
+8. **A stopwatch**: an AND gate makes a counter stop at 9 and carry into
+   the next digit.
+
+![The stopwatch, the last challenge done](img/screenshot-stopwatch.png)
 
 `n` steps through them, and a free board is always there for building
 anything else. Every board is kept in `~/.circuit/` when you quit.
@@ -35,13 +50,14 @@ anything else. Every board is kept in `~/.circuit/` when you quit.
 |---|---|
 | `←` `↑` `↓` `→` / `h` `j` `k` `l` | move the cursor |
 | `1` … `6` | add a battery, resistor, capacitor, LED, switch or transistor |
+| `a` | pick any part: gates, clock, counter, display, 555, button |
 | `w` | draw a wire: move to lay it, `w` again stops |
 | `.` | join two wires that cross; crossing wires do not touch |
 | `x` | delete the wire or part under the cursor |
-| `o` | turn a part |
+| `o` | turn a part (chips do not turn) |
 | `m` | move a part: the arrows carry it, `m` drops it |
-| `+` `-` | change a value or an LED's colour |
-| `Space` | flip a switch |
+| `+` `-` | change a value, an LED's colour or a clock's speed |
+| `Space` | flip a switch, press a button |
 | `r` | replace a burnt-out LED |
 | `p` | power on or off |
 | `n` `N` | next or previous challenge |
@@ -61,12 +77,17 @@ solved together. A capacitor remembers its voltage from one millisecond
 to the next. LEDs and transistors bend the equations, so each step
 repeats the solve until the numbers settle.
 
+A logic chip reads an input as high above 60% of the battery's voltage
+and low below 40%. Its outputs drive toward the battery or ground through
+100 Ω, so an LED on an output needs its resistor too. The chips take their
+power from the first battery on the board.
+
 Real parts are never exactly their marked value, so each one is off by up
 to 1%. That is also what lets a blinker pick a side and start.
 
 The solver runs only while the power is on and something is still
 changing. A circuit that has settled costs nothing. A blinking one costs
-about 16 ms of processor time a second.
+about 16 ms of processor time a second, and the running stopwatch about 5.
 
 ## Install
 
