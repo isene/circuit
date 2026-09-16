@@ -1,6 +1,10 @@
 # circuit
 
-Build circuits in the terminal and watch them work.
+<img src="img/circuit.svg" align="right" width="150">
+
+**Build circuits in the terminal and watch them work. Written in Rust.**
+
+![Rust](https://img.shields.io/badge/language-Rust-f74c00) ![License](https://img.shields.io/badge/license-Unlicense-green) ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-blue) ![Stay Amazing](https://img.shields.io/badge/Stay-Amazing-important)
 
 Put batteries, resistors, capacitors, LEDs, switches and transistors on a
 grid, wire them up and power on. Every voltage and current is worked out
@@ -10,6 +14,8 @@ at a time, and each one ticks itself off when your circuit works.
 
 Part of the [Fe₂O₃ suite](https://isene.github.io/fe2o3/). Built on
 [crust](https://github.com/isene/crust).
+
+![A two-transistor blinker running, the third challenge done](img/screenshot.png)
 
 ## The challenges
 
