@@ -1,0 +1,15 @@
+[package]
+name = "circuit"
+version = "0.1.0"
+edition = "2021"
+authors = ["Geir Isene <g@isene.com>"]
+description = "Build circuits in the terminal and watch them work: batteries, resistors, capacitors, LEDs, switches and transistors, with challenges that teach. Built on crust."
+license = "Unlicense"
+repository = "https://github.com/isene/circuit"
+
+[dependencies]
+crust = { version = "0.1", path = "../crust", package = "fe2o3-crust" }
+
+[profile.release]
+opt-level = 3
+lto = true
