@@ -15,6 +15,9 @@ with voltage, LEDs light up with their current, and an LED with no
 resistor burns out. Challenges teach one idea at a time, and each one
 ticks itself off when your circuit works.
 
+The panel on the right names what the cursor is on, down to the pin, and
+what it is doing.
+
 Part of the [Fe₂O₃ suite](https://isene.github.io/fe2o3/). Built on
 [crust](https://github.com/isene/crust).
 

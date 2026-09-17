@@ -700,7 +700,9 @@ impl App {
         }
         l.push(String::new());
         l.push(style::fg("Under the cursor", 245));
-        for d in self.describe() { l.extend(wrap(&d, w)); }
+        let (what, lines) = self.describe();
+        l.extend(wrap(&what, w).iter().map(|t| style::bold(t)));
+        for d in lines { l.extend(wrap(&d, w)); }
         if self.power && self.trace.len() > 1 {
             let vmax = self.vmax();
             const TICKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
@@ -722,20 +724,21 @@ impl App {
         l.iter().map(|s| format!("  {s}")).collect::<Vec<_>>().join("\n")
     }
 
-    /// Plain lines about whatever is under the cursor.
-    fn describe(&self) -> Vec<String> {
+    /// What is under the cursor, and plain lines about it.
+    fn describe(&self) -> (String, Vec<String>) {
         let sim = self.sim.as_ref().filter(|_| self.power);
         let Some(i) = self.board.part_at(self.cur) else {
-            return match (self.board.cells.get(&self.cur), sim, self.net.node_of.get(&self.cur)) {
-                (Some(Cell::Wire(m)), _, _) if board::crossing(*m) => vec!["Two wires cross here without touching. . joins them.".into()],
-                (Some(Cell::Wire(m)), _, _) if *m & 15 == 15 => vec!["Four wires joined here. . separates them.".into()],
-                (Some(Cell::Wire(_)), Some(s), Some(&n)) => vec![format!("Wire at {}", volts(s.v[n]))],
-                (Some(Cell::Wire(_)), _, _) => vec!["Wire. x deletes it.".into()],
-                _ if self.pen => vec!["Move to draw a wire. w or Esc stops.".into()],
-                _ => vec!["Empty. Press 1 to 6 or a to add a part here, or w to draw a wire.".into()],
+            let (what, line) = match (self.board.cells.get(&self.cur), sim, self.net.node_of.get(&self.cur)) {
+                (Some(Cell::Wire(m)), _, _) if board::crossing(*m) => ("Crossing wires", "They do not touch. . joins them.".into()),
+                (Some(Cell::Wire(m)), _, _) if *m & 15 == 15 => ("Joined wires", ". separates them.".into()),
+                (Some(Cell::Wire(_)), Some(s), Some(&n)) => ("Wire", format!("At {}", volts(s.v[n]))),
+                (Some(Cell::Wire(_)), _, _) => ("Wire", "x deletes it.".into()),
+                _ if self.pen => ("Empty", "Move to draw a wire. w or Esc stops.".into()),
+                _ => ("Empty", "Press 1 to 6 or a to add a part here, or w to draw a wire.".into()),
             };
+            return (what.into(), vec![line]);
         };
-        let Some(p) = self.board.part(i) else { return vec![] };
+        let Some(p) = self.board.part(i) else { return (String::new(), vec![]) };
         let d = self.net.part_dev[i];
         let node = |c: &(i32, i32)| self.net.node_of.get(c).copied();
         let pins = p.pins();
@@ -744,14 +747,23 @@ impl App {
             _ => 0.0,
         };
         let mut out = Vec::new();
+        let mut what = match p.kind {
+            Kind::Battery | Kind::Resistor | Kind::Capacitor | Kind::Clock => format!("{}, {}", cap(p.kind.name()), board::pretty(p.kind, p.value)),
+            Kind::Led => format!("{} LED", match p.color { LedColor::Red => "Red", LedColor::Green => "Green", LedColor::Yellow => "Yellow", LedColor::Blue => "Blue" }),
+            Kind::Switch => format!("Switch, {}", if p.closed { "closed" } else { "open" }),
+            Kind::Npn => "NPN transistor".into(),
+            kind => cap(kind.name()),
+        };
+        if let Some(Cell::Pin(_, k, _)) = self.board.cells.get(&self.cur) {
+            if let Some(pin) = pin_name(p.kind, *k) { what = format!("{what}, {pin}"); }
+        }
         match p.kind {
             Kind::Battery => {
-                out.push(format!("Battery, {}. + is red, − is blue.", board::pretty(p.kind, p.value)));
+                out.push("+ is red, − is blue.".into());
                 if let (Some(s), Some(d)) = (sim, d) { out.push(format!("Giving {}", amps(s.current[d]))); }
                 out.push("+ and − change the voltage.".into());
             }
             Kind::Resistor | Kind::Capacitor => {
-                out.push(format!("{}, {}", cap(p.kind.name()), board::pretty(p.kind, p.value)));
                 if let (Some(s), Some(d)) = (sim, d) {
                     let v = across(s);
                     let i = s.current[d];
@@ -765,8 +777,7 @@ impl App {
                 out.push("+ and − change the value.".into());
             }
             Kind::Led => {
-                let color = match p.color { LedColor::Red => "Red", LedColor::Green => "Green", LedColor::Yellow => "Yellow", LedColor::Blue => "Blue" };
-                out.push(format!("{color} LED. Current flows from the arrow side to the bar side."));
+                out.push("Current flows from the arrow side to the bar side.".into());
                 if p.burnt {
                     out.push("Burnt out. r puts in a new one.".into());
                 } else if let (Some(s), Some(d)) = (sim, d) {
@@ -775,29 +786,29 @@ impl App {
                 out.push("+ and − change the colour.".into());
             }
             Kind::Switch => {
-                out.push(format!("Switch, {}. Space flips it.", if p.closed { "closed" } else { "open" }));
+                out.push("Space flips it.".into());
                 if let (Some(s), Some(d)) = (sim, d) { out.push(format!("Carrying {}", amps(s.current[d]))); }
             }
             Kind::Npn => {
-                out.push("NPN transistor: collector c, base b, emitter e.".into());
+                out.push("Collector c, base b, emitter e.".into());
                 if let (Some(s), Some(d)) = (sim, d) {
                     out.push(format!("Collector {}, base {}", amps(s.current[d]), amps(s.base[d])));
                 }
             }
             Kind::Button => {
-                out.push("Button: Space presses it for a moment.".into());
+                out.push("Space presses it for a moment.".into());
                 if let (Some(s), Some(d)) = (sim, d) { out.push(format!("Carrying {}", amps(s.current[d]))); }
             }
             kind @ (Kind::Not | Kind::And | Kind::Or | Kind::Nand | Kind::Nor | Kind::Xor) => {
                 let rule = match kind {
-                    Kind::Not => "q is high when a is low",
-                    Kind::And => "q is high only when a and b are both high",
-                    Kind::Or => "q is high when a or b is high",
-                    Kind::Nand => "q is low only when a and b are both high",
-                    Kind::Nor => "q is low when a or b is high",
-                    _ => "q is high when a and b differ",
+                    Kind::Not => "q is high when a is low.",
+                    Kind::And => "q is high only when a and b are both high.",
+                    Kind::Or => "q is high when a or b is high.",
+                    Kind::Nand => "q is low only when a and b are both high.",
+                    Kind::Nor => "q is low when a or b is high.",
+                    _ => "q is high when a and b differ.",
                 };
-                out.push(format!("{}: {rule}.", kind.name()));
+                out.push(rule.into());
                 if let Some(l) = self.logic_of(i) {
                     let hl = |b: bool| if b { "high" } else { "low" };
                     out.push(if kind == Kind::Not {
@@ -808,19 +819,19 @@ impl App {
                 }
             }
             Kind::Clock => {
-                out.push(format!("Clock, {}: q goes high and low by itself.", board::pretty(p.kind, p.value)));
+                out.push("q goes high and low by itself.".into());
                 out.push("+ and − change the speed.".into());
             }
             Kind::Counter => {
-                out.push("Counter: adds one each time > goes high; a high r puts it back to 0. 1, 2, 4 and 8 show the count in binary.".into());
+                out.push("Adds one each time > goes high; a high r puts it back to 0. 1, 2, 4 and 8 show the count in binary.".into());
                 if let Some(l) = self.logic_of(i) { out.push(format!("Count {} = {}", l.value, binary_sum(l.value))); }
             }
             Kind::Display => {
-                out.push("Display: shows the digit its inputs 1, 2, 4 and 8 add up to, 0 to F.".into());
+                out.push("Shows the digit its inputs 1, 2, 4 and 8 add up to, 0 to F.".into());
                 if let Some(l) = self.logic_of(i) { out.push(format!("Showing {:X} = {}", l.value, binary_sum(l.value))); }
             }
             Kind::Timer => {
-                out.push("555 timer: o goes high when t drops below a third of its supply, and low when h rises above two thirds. While o is low, d pulls down.".into());
+                out.push("o goes high when t drops below a third of its supply, and low when h rises above two thirds. While o is low, d pulls down.".into());
                 if let Some(l) = self.logic_of(i) { out.push(format!("o {}", if l.out[0] { "high" } else { "low" })); }
             }
         }
@@ -828,7 +839,7 @@ impl App {
             out.push("No power: wire + to the battery's + and − to its −.".into());
         }
         out.push(if p.kind.is_chip() { "m moves it, x deletes it." } else { "o turns it, m moves it, x deletes it." }.into());
-        out
+        (what, out)
     }
 }
 
@@ -900,6 +911,27 @@ fn amps(i: f64) -> String {
 
 fn watts_str(w: f64) -> String {
     if w.abs() >= 1.0 { format!("{:.2} W", w) } else { format!("{:.0} mW", w * 1e3) }
+}
+
+/// The name of pin `k`, for the parts whose pins have one.
+fn pin_name(kind: Kind, k: usize) -> Option<String> {
+    if let Some(plus) = kind.power_pin() {
+        if k == plus { return Some("pin +".into()); }
+        if k == plus + 1 { return Some("pin −".into()); }
+    }
+    let name = match kind {
+        Kind::Battery => ["+", "−"].get(k)?,
+        Kind::Led => return ["arrow side", "bar side"].get(k).map(|s| s.to_string()),
+        Kind::Npn => return ["collector", "base", "emitter"].get(k).map(|s| s.to_string()),
+        Kind::Not => ["a", "q"].get(k)?,
+        Kind::Clock => ["q"].get(k)?,
+        Kind::Counter => [">", "r", "1", "2", "4", "8"].get(k)?,
+        Kind::Display => ["1", "2", "4", "8"].get(k)?,
+        Kind::Timer => ["t", "h", "d", "o"].get(k)?,
+        kind if kind.gate().is_some() => ["a", "b", "q"].get(k)?,
+        _ => return None,
+    };
+    Some(format!("pin {name}"))
 }
 
 fn cap(s: &str) -> String {
