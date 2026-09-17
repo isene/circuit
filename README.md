@@ -77,10 +77,11 @@ solved together. A capacitor remembers its voltage from one millisecond
 to the next. LEDs and transistors bend the equations, so each step
 repeats the solve until the numbers settle.
 
-A logic chip reads an input as high above 60% of the battery's voltage
-and low below 40%. Its outputs drive toward the battery or ground through
-100 Ω, so an LED on an output needs its resistor too. The chips take their
-power from the first battery on the board.
+Every logic chip has a + pin on top and a − pin below, and does nothing
+until both are wired to a battery. A high output joins its wire to the
+chip's + through 100 Ω, a low one to its −. So the current comes from the
+battery, and an LED on an output still needs its resistor. An input reads
+high above 60% of the chip's voltage and low below 40%.
 
 Real parts are never exactly their marked value, so each one is off by up
 to 1%. That is also what lets a blinker pick a side and start.

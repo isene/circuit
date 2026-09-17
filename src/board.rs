@@ -3,7 +3,8 @@
 //!
 //! A small part is a row of body cells with pin cells around it; a chip
 //! is a block with its inputs down the left side and outputs down the
-//! right. Wires are cells too, each holding which
+//! right. Every logic part has its + on top and its − below, so both
+//! reach the rails with a straight wire. Wires are cells too, each holding which
 //! of its four sides it joins. A wire and a pin join when both point at
 //! each other. Where two wires cross straight over each other they do not
 //! touch, unless the cell is marked as a join.
@@ -106,6 +107,18 @@ impl Kind {
         })
     }
 
+    /// Where a logic part's + sits in its pin list; its − comes right after.
+    pub fn power_pin(self) -> Option<usize> {
+        Some(match self {
+            Kind::Not => 2,
+            Kind::And | Kind::Or | Kind::Nand | Kind::Nor | Kind::Xor => 3,
+            Kind::Clock => 1,
+            Kind::Counter => 6,
+            Kind::Display | Kind::Timer => 4,
+            _ => return None,
+        })
+    }
+
     /// Counters, displays and timers are blocks that do not turn.
     pub fn is_chip(self) -> bool {
         matches!(self, Kind::Counter | Kind::Display | Kind::Timer)
@@ -147,13 +160,14 @@ impl Part {
     /// Pin cells, in order: a battery's + and −, an LED's anode and
     /// cathode, a transistor's collector, base and emitter, a gate's a, b
     /// and q, a counter's clock, reset and 1 2 4 8, a display's 1 2 4 8, a
-    /// 555's trigger, threshold, discharge and output.
+    /// 555's trigger, threshold, discharge and output. A logic part ends
+    /// with its + above the body and its − below.
     pub fn pins(&self) -> Vec<(i32, i32)> {
         let (x, y) = (self.x, self.y);
-        let (w, _) = self.size();
+        let (w, h) = self.size();
         let (left, right, top, bottom) = ((x - 1, y), (x + w, y), (x + 1, y - 1), (x + 1, y + 1));
         let flat = self.orient % 2 == 0;
-        match self.kind {
+        let mut pins = match self.kind {
             Kind::Npn => {
                 let base = if flat { left } else { right };
                 let (c, e) = if self.orient < 2 { (top, bottom) } else { (bottom, top) };
@@ -171,7 +185,13 @@ impl Part {
                 2 => vec![top, bottom],
                 _ => vec![bottom, top],
             },
+        };
+        if self.kind.power_pin().is_some() {
+            // Two-input gates have a and b at x + 1, so power moves one further over.
+            let col = x + if self.kind.gate().is_some() && self.kind != Kind::Not { 3 } else { 2 };
+            pins.extend([(col, y - 1), (col, y + h)]);
         }
+        pins
     }
 
     pub fn body(&self) -> Vec<(i32, i32)> {
@@ -400,17 +420,16 @@ impl Board {
         let mut dev_part = Vec::new();
         let mut part_dev = vec![None; self.parts.len()];
         let mut ground = None;
-        let mut vhigh = None;
         for (i, p) in self.parts.iter().enumerate() {
             let Some(p) = p else { continue };
             let pin: Vec<usize> = p.pins().iter().map(|c| node_of[c]).collect();
             // Real parts are never exactly their marked value. The spread
             // also lets a symmetric blinker pick a side and start.
             let tol = 1.0 + tolerance(i);
+            let (plus, minus) = p.kind.power_pin().map_or((0, 0), |k| (pin[k], pin[k + 1]));
             let dev = match p.kind {
                 Kind::Battery => {
                     ground.get_or_insert(pin[1]);
-                    vhigh.get_or_insert(p.value);
                     Dev::Battery { p: pin[0], n: pin[1], volts: p.value }
                 }
                 Kind::Resistor => Dev::Resistor { a: pin[0], b: pin[1], ohms: p.value * tol },
@@ -418,21 +437,21 @@ impl Board {
                 Kind::Led => Dev::Led { a: pin[0], k: pin[1], color: p.color, burnt: p.burnt },
                 Kind::Switch | Kind::Button => Dev::Switch { a: pin[0], b: pin[1], closed: p.closed },
                 Kind::Npn => Dev::Npn { c: pin[0], b: pin[1], e: pin[2] },
-                Kind::Not => Dev::Gate { gate: Gate::Not, a: pin[0], b: pin[0], q: pin[1] },
+                Kind::Not => Dev::Gate { gate: Gate::Not, a: pin[0], b: pin[0], q: pin[1], plus, minus },
                 Kind::And | Kind::Or | Kind::Nand | Kind::Nor | Kind::Xor => {
-                    Dev::Gate { gate: p.kind.gate().unwrap_or(Gate::And), a: pin[0], b: pin[1], q: pin[2] }
+                    Dev::Gate { gate: p.kind.gate().unwrap_or(Gate::And), a: pin[0], b: pin[1], q: pin[2], plus, minus }
                 }
-                Kind::Clock => Dev::Clock { q: pin[0], hz: p.value },
-                Kind::Counter => Dev::Counter { clk: pin[0], rst: pin[1], q: [pin[2], pin[3], pin[4], pin[5]] },
-                Kind::Display => Dev::Display { d: [pin[0], pin[1], pin[2], pin[3]] },
-                Kind::Timer => Dev::Timer { trig: pin[0], thres: pin[1], dis: pin[2], out: pin[3] },
+                Kind::Clock => Dev::Clock { q: pin[0], hz: p.value, plus, minus },
+                Kind::Counter => Dev::Counter { clk: pin[0], rst: pin[1], q: [pin[2], pin[3], pin[4], pin[5]], plus, minus },
+                Kind::Display => Dev::Display { d: [pin[0], pin[1], pin[2], pin[3]], plus, minus },
+                Kind::Timer => Dev::Timer { trig: pin[0], thres: pin[1], dis: pin[2], out: pin[3], plus, minus },
             };
             part_dev[i] = Some(devs.len());
             dev_part.push(i);
             devs.push(dev);
         }
         Net {
-            circuit: Circuit { nodes: number.len().max(1), ground: ground.unwrap_or(0), vhigh, devs },
+            circuit: Circuit { nodes: number.len().max(1), ground: ground.unwrap_or(0), devs },
             dev_part,
             part_dev,
             node_of,
@@ -579,15 +598,18 @@ mod tests {
     }
 
     #[test]
-    fn chips_have_inputs_left_and_outputs_right() {
+    fn chips_have_inputs_left_outputs_right_plus_on_top_and_minus_below() {
         let c = Part::new(Kind::Counter, 10, 10);
-        assert_eq!(c.pins(), vec![(9, 10), (9, 11), (15, 10), (15, 11), (15, 12), (15, 13)]);
+        assert_eq!(c.pins(), vec![(9, 10), (9, 11), (15, 10), (15, 11), (15, 12), (15, 13), (12, 9), (12, 14)]);
         assert_eq!(c.inward((9, 11)), E);
         assert_eq!(c.inward((15, 13)), W);
+        assert_eq!(c.inward((12, 9)), S);
+        assert_eq!(c.inward((12, 14)), N);
         assert_eq!(c.body().len(), 20);
         let g = Part::new(Kind::Nand, 10, 10);
-        assert_eq!(g.pins(), vec![(11, 9), (11, 11), (14, 10)]);
+        assert_eq!(g.pins(), vec![(11, 9), (11, 11), (14, 10), (13, 9), (13, 11)]);
         assert_eq!(g.inward((11, 11)), N);
+        assert_eq!(Part::new(Kind::Clock, 10, 10).pins(), vec![(14, 10), (12, 9), (12, 11)]);
         let mut b = Board::default();
         b.place(Part::new(Kind::Display, 0, 0)).unwrap();
         assert!(b.place(Part::new(Kind::Resistor, 2, 3)).is_none(), "the display's body is taken");

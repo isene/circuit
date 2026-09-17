@@ -409,10 +409,10 @@ impl App {
         }
     }
 
-    /// A logic part's state, while the power is on.
+    /// A logic part's state, while it has power.
     fn logic_of(&self, i: usize) -> Option<Logic> {
         let sim = self.sim.as_ref().filter(|_| self.power)?;
-        self.net.part_dev.get(i).copied().flatten().map(|d| sim.logic[d])
+        self.net.part_dev.get(i).copied().flatten().map(|d| sim.logic[d]).filter(|l| l.on)
     }
 
     fn vmax(&self) -> f64 {
@@ -485,7 +485,7 @@ impl App {
                 out.push(if part.burnt { 255 } else { led_color(part.color, (sim.current[d] / LED_FULL).clamp(0.0, 1.0)) });
             }
             let l = sim.logic[d];
-            out.push(l.out.iter().enumerate().fold(0, |acc, (k, &b)| acc | (b as u8) << k));
+            out.push(l.out.iter().enumerate().fold(l.on as u8, |acc, (k, &b)| acc | (b as u8) << (k + 1)));
             out.push(l.value);
         }
         out
@@ -564,6 +564,10 @@ impl App {
             Some(Cell::Wire(m)) => (BOX[*m as usize & 15], wire_color(), None, false),
             Some(Cell::Pin(i, k, m)) => {
                 let Some(p) = self.board.part(*i) else { return ('?', 196, None, false) };
+                if let Some(plus) = p.kind.power_pin() {
+                    if *k == plus { return ('+', 196, None, true); }
+                    if *k == plus + 1 { return ('−', 81, None, true); }
+                }
                 match p.kind {
                     Kind::Battery if *k == 0 => ('+', 196, None, true),
                     Kind::Battery => ('−', 81, None, true),
@@ -816,9 +820,12 @@ impl App {
                 if let Some(l) = self.logic_of(i) { out.push(format!("Showing {:X} = {}", l.value, binary_sum(l.value))); }
             }
             Kind::Timer => {
-                out.push("555 timer: o goes high when t drops below a third of the battery, and low when h rises above two thirds. While o is low, d pulls down.".into());
+                out.push("555 timer: o goes high when t drops below a third of its supply, and low when h rises above two thirds. While o is low, d pulls down.".into());
                 if let Some(l) = self.logic_of(i) { out.push(format!("o {}", if l.out[0] { "high" } else { "low" })); }
             }
+        }
+        if p.kind.power_pin().is_some() && self.power && self.logic_of(i).is_none() {
+            out.push("No power: wire + to the battery's + and − to its −.".into());
         }
         out.push(if p.kind.is_chip() { "m moves it, x deletes it." } else { "o turns it, m moves it, x deletes it." }.into());
         out
@@ -848,8 +855,9 @@ const HELP: &str = "
 
   Wires glow green with voltage, brighter for higher,
   and red below zero. LEDs glow with their current.
-  Chips take power from the first battery; an input
-  reads high above 60% of it and low below 40%.
+  Every chip needs its + and − wired to a battery.
+  An input reads high above 60% of that voltage
+  and low below 40%.
   A part's value is printed the way it is marked:
   4k7 is 4.7 kΩ, 10µ is 10 µF, 9V0 is 9 V.
 

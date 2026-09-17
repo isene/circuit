@@ -40,7 +40,7 @@ Then a capacitor from each collector to the other transistor's base.",
     Lesson {
         title: "Logic gates",
         text: "A logic chip reads each input as high, near +, or low, near −. An AND gate's output q is high only \
-when a and b are both high. Chips take their power from the battery. \
+when a and b are both high. Like every chip it needs power: its + to the battery's + and its − to −. \
 Wire each switch from + to one input, with a 10 kΩ resistor from that input to − so it reads low while the switch \
 is open. Then q through 470 Ω and the LED to −. Power on and try all four switch settings.",
         goal: "the LED follows the AND gate for all four switch settings.",
@@ -49,14 +49,16 @@ is open. Then q through 470 Ω and the LED to −. Power on and try all four swi
         title: "Count in binary",
         text: "A counter adds one each time its > input goes from low to high, and a high r puts it back to 0. \
 Its outputs 1, 2, 4 and 8 show the count in binary: 13 is 8 + 4 + 1. \
-Wire the clock's q to >, r to −, and each output through 470 Ω to an LED and on to −.",
+Wire + and − on both chips to the battery. \
+Then the clock's q to >, r to −, and each output through 470 Ω to an LED and on to −.",
         goal: "the LEDs count all the way to 15, all four lit, and start over.",
     },
     Lesson {
         title: "Numbers on a display",
         text: "Four wires carry any number from 0 to 15. A display chip turns them back into one digit, carrying \
 on past 9 with A, b, C, d, E and F. \
-Wire the clock to the counter's >, r to −, and the counter's 1, 2, 4 and 8 to the display's 1, 2, 4 and 8.",
+Wire + and − on all three chips. \
+Then the clock to the counter's >, r to −, and the counter's 1, 2, 4 and 8 to the display's 1, 2, 4 and 8.",
         goal: "the display shows all sixteen digits, 0 to F.",
     },
     Lesson {
@@ -64,7 +66,7 @@ Wire the clock to the counter's >, r to −, and the counter's 1, 2, 4 and 8 to 
         text: "The 555 may be the most-made chip of all. Here a capacitor charges through 10 kΩ and 68 kΩ until h \
 sees two thirds of the battery. Then d empties it through the 68 kΩ until t sees one third, and it starts over. \
 A round takes about 0.7 × (10 kΩ + 2 × 68 kΩ) × 10 µF, one second. \
-Wire + to 10 kΩ to d, d to 68 kΩ to h, h to t, and t to the capacitor and on to −. \
+Wire the 555's + and − to the battery. Then + to 10 kΩ to d, d to 68 kΩ to h, h to t, and t to the capacitor and on to −. \
 Then o through 470 Ω and the LED to −.",
         goal: "the 555 blinks the LED, each half a tenth of a second to 3 seconds.",
     },
@@ -74,7 +76,8 @@ Then o through 470 Ω and the LED to −.",
 8 are high together for the first time. An AND gate on those two outputs can reset the counter the moment it \
 gets there, so it only ever shows 0 to 9. That same pulse is the carry into the next digit. \
 The clock at 10 Hz drives the first counter, and its display shows tenths. The AND gate feeds the first \
-counter's r and the second counter's >, and the second display shows seconds.",
+counter's r and the second counter's >, and the second display shows seconds. \
+All six chips need + and −, so run a + wire along the top and a − wire along the bottom.",
         goal: "one display counts tenths from 0 to 9 and the other reaches 3 seconds.",
     },
 ];
@@ -151,13 +154,13 @@ pub fn starter(n: usize) -> Board {
             put(Kind::Led, 42, 6, &none);
         }
         8 => {
-            put(Kind::Battery, 4, 20, &stand);
-            put(Kind::Clock, 8, 4, &|p| p.value = 10.0);
-            put(Kind::Counter, 20, 4, &none);
-            put(Kind::Display, 34, 4, &none);
-            put(Kind::And, 22, 12, &none);
-            put(Kind::Counter, 34, 12, &none);
-            put(Kind::Display, 46, 12, &none);
+            put(Kind::Battery, 1, 15, &stand);
+            put(Kind::Clock, 4, 5, &|p| p.value = 10.0);
+            put(Kind::Counter, 12, 5, &none);
+            put(Kind::Display, 26, 5, &none);
+            put(Kind::And, 20, 12, &none);
+            put(Kind::Counter, 34, 16, &none);
+            put(Kind::Display, 46, 16, &none);
         }
         _ => {}
     }
@@ -262,7 +265,7 @@ impl Progress {
                 false
             }
             6 => c.devs.iter().enumerate().any(|(i, d)| {
-                if !matches!(d, Dev::Display { .. }) || c.vhigh.is_none() { return false; }
+                if !matches!(d, Dev::Display { .. }) || !s.logic[i].on { return false; }
                 self.seen[i] |= 1 << s.logic[i].value;
                 self.seen[i] == 0xFFFF
             }),
@@ -311,9 +314,25 @@ mod tests {
     fn rails() -> Board {
         let mut b = Board::default();
         part(&mut b, Kind::Battery, 1, 15, 2, |_| {});
-        path(&mut b, (2, 14), &format!("{}{}", "U".repeat(14), "R".repeat(42)));
-        path(&mut b, (2, 16), &format!("{}{}", "D".repeat(14), "R".repeat(42)));
+        path(&mut b, (2, 14), &format!("{}{}", "U".repeat(14), "R".repeat(50)));
+        path(&mut b, (2, 16), &format!("{}{}", "D".repeat(14), "R".repeat(50)));
         b
+    }
+
+    /// A logic part at (x, y), its + wired up to row 0 and its − down to row 30.
+    fn chip(b: &mut Board, kind: Kind, x: i32, y: i32, f: impl Fn(&mut Part)) {
+        part(b, kind, x, y, 0, f);
+        let pins = b.parts.iter().flatten().last().expect("just placed").pins();
+        let (plus, minus) = (pins[pins.len() - 2], pins[pins.len() - 1]);
+        path(b, plus, &"U".repeat(plus.1 as usize));
+        path(b, minus, &"D".repeat(30 - minus.1 as usize));
+    }
+
+    #[test]
+    fn every_starter_part_fits() {
+        for (n, want) in [(1, 3), (2, 6), (3, 11), (4, 8), (5, 11), (6, 4), (7, 7), (8, 7)] {
+            assert_eq!(starter(n).parts.iter().flatten().count(), want, "challenge {n}");
+        }
     }
 
     #[test]
@@ -348,25 +367,25 @@ mod tests {
     /// A two-digit stopwatch: tenths on the first display, seconds on the second.
     fn stopwatch() -> Board {
         let mut b = rails();
-        part(&mut b, Kind::Clock, 6, 4, 0, |p| p.value = 10.0); // q (10,4)
-        part(&mut b, Kind::Counter, 14, 4, 0, |_| {}); // > (13,4), r (13,5), 1 2 4 8 at (19,4..7)
-        part(&mut b, Kind::Display, 26, 4, 0, |_| {}); // inputs (25,4..7)
-        part(&mut b, Kind::And, 16, 12, 0, |_| {}); // a (17,11), b (17,13), q (20,12)
-        part(&mut b, Kind::Counter, 34, 14, 0, |_| {}); // > (33,14), r (33,15), outputs (39,14..17)
-        part(&mut b, Kind::Display, 46, 14, 0, |_| {}); // inputs (45,14..17)
-        path(&mut b, (10, 4), "RRR");
-        for y in 4..8 { path(&mut b, (19, y), "RRRRRR"); }
-        // Output 2 to a, crossing the 4 and 8 wires.
-        path(&mut b, (21, 5), &format!("{}{}", "D".repeat(6), "L".repeat(4)));
-        // Output 8 to b, from below.
-        path(&mut b, (23, 7), &format!("{}{}U", "D".repeat(7), "L".repeat(6)));
+        chip(&mut b, Kind::Clock, 4, 5, |p| p.value = 10.0); // q (8,5)
+        chip(&mut b, Kind::Counter, 12, 5, |_| {}); // > (11,5), r (11,6), 1 2 4 8 at (17,5..8)
+        chip(&mut b, Kind::Display, 26, 5, |_| {}); // inputs (25,5..8)
+        chip(&mut b, Kind::And, 20, 12, |_| {}); // a (21,11), b (21,13), q (24,12)
+        chip(&mut b, Kind::Counter, 34, 16, |_| {}); // > (33,16), r (33,17), outputs (39,16..19)
+        chip(&mut b, Kind::Display, 46, 16, |_| {}); // inputs (45,16..19)
+        path(&mut b, (8, 5), "RRR");
+        for y in 5..9 { path(&mut b, (17, y), &"R".repeat(8)); }
+        // Output 2 down to a, crossing the 4 and 8 wires.
+        path(&mut b, (21, 6), &"D".repeat(5));
+        // Output 8 down and across to b.
+        path(&mut b, (17, 8), &format!("{}RRRR", "D".repeat(5)));
         // q down and across to the second counter's clock.
-        path(&mut b, (20, 12), &format!("RR{}{}UUUR", "D".repeat(5), "R".repeat(10)));
+        path(&mut b, (24, 12), &format!("RRDDDD{}", "R".repeat(7)));
         // The same pulse back to the first counter's reset.
-        path(&mut b, (22, 16), &format!("{}{}R", "L".repeat(10), "U".repeat(11)));
+        path(&mut b, (26, 14), &format!("{}{}R", "L".repeat(16), "U".repeat(8)));
         // Second counter's reset to −.
-        path(&mut b, (33, 15), &"D".repeat(15));
-        for y in 14..18 { path(&mut b, (39, y), "RRRRRR"); }
+        path(&mut b, (33, 17), &format!("L{}", "D".repeat(13)));
+        for y in 16..20 { path(&mut b, (39, y), &"R".repeat(6)); }
         b
     }
 
@@ -374,6 +393,10 @@ mod tests {
     fn the_stopwatch_challenge_is_met_on_a_wired_board() {
         let b = stopwatch();
         let net = b.net();
+        let unpowered = starter(8).net();
+        let mut sim = Sim::new(&unpowered.circuit);
+        for _ in 0..500 { sim.step(&unpowered.circuit, 1e-3); }
+        assert!(sim.logic.iter().all(|l| !l.on), "chips with no wires to the battery stay dead");
         let mut sim = Sim::new(&net.circuit);
         let mut progress = Progress::default();
         progress.reset(net.circuit.devs.len());
@@ -388,9 +411,9 @@ mod tests {
     #[test]
     fn the_display_challenge_is_met_on_a_wired_board() {
         let mut b = rails();
-        part(&mut b, Kind::Clock, 10, 4, 0, |p| p.value = 20.0); // q at (14,4)
-        part(&mut b, Kind::Counter, 20, 4, 0, |_| {}); // > (19,4), r (19,5), 1 2 4 8 at (25,4..7)
-        part(&mut b, Kind::Display, 32, 4, 0, |_| {}); // 1 2 4 8 at (31,4..7)
+        chip(&mut b, Kind::Clock, 10, 4, |p| p.value = 20.0); // q at (14,4)
+        chip(&mut b, Kind::Counter, 20, 4, |_| {}); // > (19,4), r (19,5), 1 2 4 8 at (25,4..7)
+        chip(&mut b, Kind::Display, 32, 4, |_| {}); // 1 2 4 8 at (31,4..7)
         path(&mut b, (14, 4), "RRRRR");
         path(&mut b, (19, 5), &format!("L{}", "D".repeat(25)));
         for y in 4..8 { path(&mut b, (25, y), "RRRRRR"); }

@@ -7,11 +7,13 @@
 //! solve until the voltages stop moving (Newton's method). A capacitor
 //! remembers its voltage from the step before.
 //!
-//! Logic chips sit in the same circuit. An output drives its wire toward
-//! the battery's voltage or ground through a small resistance, so an LED
-//! on an output still needs its resistor. An input reads the voltage on
-//! its wire. After each step the chips look at their inputs and set their
-//! outputs for the next step, so every gate takes a millisecond.
+//! Logic chips sit in the same circuit. Each has a + and a − pin and does
+//! nothing until they are at least 3 volts apart. A high output joins its
+//! wire to the chip's + through a small resistance, a low one to its −, so
+//! an output's current comes from the battery, and an LED on an output
+//! still needs its resistor. An input reads its wire against the chip's
+//! own − and +. After each step the chips look at their inputs and set
+//! their outputs for the next step, so every gate takes a millisecond.
 
 /// The thermal voltage at room temperature, in volts.
 const VT: f64 = 0.025852;
@@ -35,6 +37,8 @@ const NPN_BR: f64 = 1.0;
 const OUT_R: f64 = 100.0;
 /// A 555's discharge pin when it pulls down, in ohms.
 const DIS_R: f64 = 20.0;
+/// A chip wakes up once its + is this many volts above its −.
+const MIN_SUPPLY: f64 = 3.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Gate { Not, And, Or, Nand, Nor, Xor }
@@ -61,6 +65,8 @@ pub struct Logic {
     pub ins: [bool; 4],
     /// A counter's count, or the digit a display shows.
     pub value: u8,
+    /// The chip has power.
+    pub on: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -87,25 +93,34 @@ pub enum Dev {
     Switch { a: usize, b: usize, closed: bool },
     /// Collector, base, emitter.
     Npn { c: usize, b: usize, e: usize },
-    /// Inputs a and b (a NOT only reads a), output q.
-    Gate { gate: Gate, a: usize, b: usize, q: usize },
+    /// Inputs a and b (a NOT only reads a), output q. Every logic part
+    /// below also has its + and − nodes.
+    Gate { gate: Gate, a: usize, b: usize, q: usize, plus: usize, minus: usize },
     /// A square wave on q, `hz` times a second.
-    Clock { q: usize, hz: f64 },
+    Clock { q: usize, hz: f64, plus: usize, minus: usize },
     /// Counts each rising edge on clk; r high holds it at 0. Outputs 1, 2, 4, 8.
-    Counter { clk: usize, rst: usize, q: [usize; 4] },
+    Counter { clk: usize, rst: usize, q: [usize; 4], plus: usize, minus: usize },
     /// Shows the digit its inputs 1, 2, 4, 8 add up to.
-    Display { d: [usize; 4] },
+    Display { d: [usize; 4], plus: usize, minus: usize },
     /// A 555 timer: trigger, threshold, discharge, output.
-    Timer { trig: usize, thres: usize, dis: usize, out: usize },
+    Timer { trig: usize, thres: usize, dis: usize, out: usize, plus: usize, minus: usize },
+}
+
+impl Dev {
+    /// A logic part's + and − nodes.
+    fn supply(&self) -> Option<(usize, usize)> {
+        match *self {
+            Dev::Gate { plus, minus, .. } | Dev::Clock { plus, minus, .. } | Dev::Counter { plus, minus, .. }
+            | Dev::Display { plus, minus, .. } | Dev::Timer { plus, minus, .. } => Some((plus, minus)),
+            _ => None,
+        }
+    }
 }
 
 pub struct Circuit {
     pub nodes: usize,
     pub ground: usize,
     pub devs: Vec<Dev>,
-    /// The voltage a logic output drives high: the first battery's. None
-    /// when there is no battery, and the chips are dead.
-    pub vhigh: Option<f64>,
 }
 
 impl Circuit {
@@ -214,15 +229,16 @@ impl Sim {
                             rhs[node] -= i0 - dbe * vbe - dbc * vbc;
                         }
                     }
-                    Dev::Gate { q, .. } | Dev::Clock { q, .. } => drive(&mut g, &mut rhs, c, q, self.logic[di].out[0]),
-                    Dev::Counter { q, .. } => {
-                        for (k, &node) in q.iter().enumerate() { drive(&mut g, &mut rhs, c, node, self.logic[di].out[k]); }
+                    Dev::Gate { q, plus, minus, .. } | Dev::Clock { q, plus, minus, .. } => {
+                        drive(&mut g, n, q, plus, minus, self.logic[di], 0);
                     }
-                    Dev::Timer { dis, out, .. } => {
-                        drive(&mut g, &mut rhs, c, out, self.logic[di].out[0]);
-                        if c.vhigh.is_some() && !self.logic[di].out[0] {
-                            conductance(&mut g, n, dis, c.ground, 1.0 / DIS_R);
-                        }
+                    Dev::Counter { q, plus, minus, .. } => {
+                        for (k, &node) in q.iter().enumerate() { drive(&mut g, n, node, plus, minus, self.logic[di], k); }
+                    }
+                    Dev::Timer { dis, out, plus, minus, .. } => {
+                        let l = self.logic[di];
+                        drive(&mut g, n, out, plus, minus, l, 0);
+                        if l.on && !l.out[0] { conductance(&mut g, n, dis, minus, 1.0 / DIS_R); }
                     }
                     Dev::Display { .. } => {}
                 }
@@ -247,23 +263,27 @@ impl Sim {
     /// Chips read their inputs and set their outputs for the next step.
     /// True when an output changed.
     fn logic_step(&mut self, c: &Circuit) -> bool {
-        let Some(vh) = c.vhigh else {
-            for l in self.logic.iter_mut() { l.out = [false; 4]; }
-            return false;
-        };
         let v = &self.v;
-        let g = c.ground;
-        // High above 60% of the battery, low below 40%; in between an
-        // input keeps what it read last.
-        let read = |node: usize, was: bool| {
-            let x = v[node] - v[g];
-            if was { x > 0.4 * vh } else { x > 0.6 * vh }
-        };
         let t = self.t;
         let mut changed = false;
         for (di, d) in c.devs.iter().enumerate() {
+            let Some((plus, minus)) = d.supply() else { continue };
             let l = &mut self.logic[di];
-            let before = l.out;
+            let before = (l.out, l.on);
+            let vs = v[plus] - v[minus];
+            if vs < MIN_SUPPLY {
+                // No power: the chip forgets its count and lets go of its outputs.
+                *l = Logic::default();
+                changed |= (l.out, l.on) != before;
+                continue;
+            }
+            l.on = true;
+            // High above 60% of the chip's supply, low below 40%; in
+            // between an input keeps what it read last.
+            let read = |node: usize, was: bool| {
+                let x = v[node] - v[minus];
+                if was { x > 0.4 * vs } else { x > 0.6 * vs }
+            };
             match *d {
                 Dev::Gate { gate, a, b, .. } => {
                     l.ins[0] = read(a, l.ins[0]);
@@ -279,7 +299,7 @@ impl Sim {
                     l.ins[1] = reset;
                     for k in 0..4 { l.out[k] = (l.value >> k) & 1 == 1; }
                 }
-                Dev::Display { d } => {
+                Dev::Display { d, .. } => {
                     let mut value = 0;
                     for k in 0..4 {
                         l.ins[k] = read(d[k], l.ins[k]);
@@ -288,13 +308,13 @@ impl Sim {
                     l.value = value;
                 }
                 Dev::Timer { trig, thres, .. } => {
-                    // The trigger wins: below a third of the battery the
+                    // The trigger wins: below a third of the supply the
                     // output goes high; above two thirds on the threshold, low.
-                    if v[trig] - v[g] < vh / 3.0 { l.out[0] = true; } else if v[thres] - v[g] > 2.0 * vh / 3.0 { l.out[0] = false; }
+                    if v[trig] - v[minus] < vs / 3.0 { l.out[0] = true; } else if v[thres] - v[minus] > 2.0 * vs / 3.0 { l.out[0] = false; }
                 }
                 _ => {}
             }
-            changed |= l.out != before;
+            changed |= (l.out, l.on) != before;
         }
         changed
     }
@@ -332,14 +352,10 @@ impl Sim {
     }
 }
 
-/// A logic output: 100 Ω toward the battery's voltage or toward ground.
-fn drive(g: &mut [f64], rhs: &mut [f64], c: &Circuit, node: usize, high: bool) {
-    let Some(vh) = c.vhigh else { return };
-    conductance(g, c.nodes, node, c.ground, 1.0 / OUT_R);
-    if high {
-        rhs[node] += vh / OUT_R;
-        rhs[c.ground] -= vh / OUT_R;
-    }
+/// Logic output `k`: 100 Ω to the chip's + when high, to its − when low,
+/// and nothing while the chip has no power.
+fn drive(g: &mut [f64], n: usize, node: usize, plus: usize, minus: usize, l: Logic, k: usize) {
+    if l.on { conductance(g, n, node, if l.out[k] { plus } else { minus }, 1.0 / OUT_R); }
 }
 
 fn conductance(g: &mut [f64], n: usize, a: usize, b: usize, s: f64) {
@@ -435,12 +451,12 @@ mod tests {
     #[test]
     fn an_and_gate_follows_its_inputs() {
         // 1 plus, 2 input a (held high), 3 input b (switch with pull-down), 4 output.
-        let mut c = Circuit { nodes: 5, ground: 0, vhigh: Some(9.0), devs: vec![
+        let mut c = Circuit { nodes: 5, ground: 0, devs: vec![
             Dev::Battery { p: 1, n: 0, volts: 9.0 },
             Dev::Resistor { a: 1, b: 2, ohms: 1000.0 },
             Dev::Switch { a: 1, b: 3, closed: false },
             Dev::Resistor { a: 3, b: 0, ohms: 10_000.0 },
-            Dev::Gate { gate: Gate::And, a: 2, b: 3, q: 4 },
+            Dev::Gate { gate: Gate::And, a: 2, b: 3, q: 4, plus: 1, minus: 0 },
             Dev::Resistor { a: 4, b: 0, ohms: 10_000.0 },
         ]};
         let s = run(&c, 0.02);
@@ -451,12 +467,29 @@ mod tests {
     }
 
     #[test]
-    fn a_clock_drives_a_counter_and_the_display_shows_its_count() {
-        let c = Circuit { nodes: 7, ground: 0, vhigh: Some(9.0), devs: vec![
+    fn a_chip_runs_on_its_own_plus_and_minus_and_its_output_current_comes_from_the_battery() {
+        // 1 plus, 2 output into 1 kΩ, 3 a + wire that goes nowhere.
+        let mut c = Circuit { nodes: 4, ground: 0, devs: vec![
             Dev::Battery { p: 1, n: 0, volts: 9.0 },
-            Dev::Clock { q: 2, hz: 10.0 },
-            Dev::Counter { clk: 2, rst: 0, q: [3, 4, 5, 6] },
-            Dev::Display { d: [3, 4, 5, 6] },
+            Dev::Gate { gate: Gate::And, a: 1, b: 1, q: 2, plus: 1, minus: 0 },
+            Dev::Resistor { a: 2, b: 0, ohms: 1000.0 },
+        ]};
+        let s = run(&c, 0.01);
+        assert!(s.logic[1].on && s.v[2] > 8.0, "powered output {}", s.v[2]);
+        assert!((s.current[0] - s.current[2]).abs() < 1e-6, "battery {} load {}", s.current[0], s.current[2]);
+        c.devs[1] = Dev::Gate { gate: Gate::And, a: 1, b: 1, q: 2, plus: 3, minus: 0 };
+        let s = run(&c, 0.01);
+        assert!(!s.logic[1].on && s.v[2].abs() < 1e-3, "unpowered output {}", s.v[2]);
+        assert!(s.current[0].abs() < 1e-6, "the battery gives nothing: {}", s.current[0]);
+    }
+
+    #[test]
+    fn a_clock_drives_a_counter_and_the_display_shows_its_count() {
+        let c = Circuit { nodes: 7, ground: 0, devs: vec![
+            Dev::Battery { p: 1, n: 0, volts: 9.0 },
+            Dev::Clock { q: 2, hz: 10.0, plus: 1, minus: 0 },
+            Dev::Counter { clk: 2, rst: 0, q: [3, 4, 5, 6], plus: 1, minus: 0 },
+            Dev::Display { d: [3, 4, 5, 6], plus: 1, minus: 0 },
         ]};
         let s = run(&c, 1.05);
         let count = s.logic[2].value;
@@ -467,12 +500,12 @@ mod tests {
     #[test]
     fn a_555_with_10k_68k_and_10uf_blinks_about_once_a_second() {
         // 1 plus, 2 discharge, 3 capacitor (trigger and threshold), 4 output.
-        let c = Circuit { nodes: 5, ground: 0, vhigh: Some(9.0), devs: vec![
+        let c = Circuit { nodes: 5, ground: 0, devs: vec![
             Dev::Battery { p: 1, n: 0, volts: 9.0 },
             Dev::Resistor { a: 1, b: 2, ohms: 10_000.0 },
             Dev::Resistor { a: 2, b: 3, ohms: 68_000.0 },
             Dev::Capacitor { a: 3, b: 0, farads: 10e-6 },
-            Dev::Timer { trig: 3, thres: 3, dis: 2, out: 4 },
+            Dev::Timer { trig: 3, thres: 3, dis: 2, out: 4, plus: 1, minus: 0 },
             Dev::Resistor { a: 4, b: 0, ohms: 10_000.0 },
         ]};
         let mut s = Sim::new(&c);
@@ -492,12 +525,12 @@ mod tests {
     fn an_and_gate_on_outputs_2_and_8_makes_a_counter_stop_at_nine() {
         // Counter 1 counts a 100 Hz clock; AND of its 2 and 8 resets it and
         // clocks counter 2, which then counts tens.
-        let c = Circuit { nodes: 12, ground: 0, vhigh: Some(9.0), devs: vec![
+        let c = Circuit { nodes: 12, ground: 0, devs: vec![
             Dev::Battery { p: 1, n: 0, volts: 9.0 },
-            Dev::Clock { q: 2, hz: 100.0 },
-            Dev::Counter { clk: 2, rst: 7, q: [3, 4, 5, 6] },
-            Dev::Gate { gate: Gate::And, a: 4, b: 6, q: 7 },
-            Dev::Counter { clk: 7, rst: 0, q: [8, 9, 10, 11] },
+            Dev::Clock { q: 2, hz: 100.0, plus: 1, minus: 0 },
+            Dev::Counter { clk: 2, rst: 7, q: [3, 4, 5, 6], plus: 1, minus: 0 },
+            Dev::Gate { gate: Gate::And, a: 4, b: 6, q: 7, plus: 1, minus: 0 },
+            Dev::Counter { clk: 7, rst: 0, q: [8, 9, 10, 11], plus: 1, minus: 0 },
         ]};
         let mut s = Sim::new(&c);
         let mut over = 0;
@@ -513,7 +546,7 @@ mod tests {
     #[test]
     fn a_divider_halves_the_battery() {
         // 0 ground, 1 battery plus, 2 middle.
-        let c = Circuit { nodes: 3, ground: 0, vhigh: Some(9.0), devs: vec![
+        let c = Circuit { nodes: 3, ground: 0, devs: vec![
             Dev::Battery { p: 1, n: 0, volts: 9.0 },
             Dev::Resistor { a: 1, b: 2, ohms: 1000.0 },
             Dev::Resistor { a: 2, b: 0, ohms: 1000.0 },
@@ -525,7 +558,7 @@ mod tests {
 
     #[test]
     fn an_led_through_470_ohms_draws_about_15_ma() {
-        let c = Circuit { nodes: 3, ground: 0, vhigh: Some(9.0), devs: vec![
+        let c = Circuit { nodes: 3, ground: 0, devs: vec![
             Dev::Battery { p: 1, n: 0, volts: 9.0 },
             Dev::Resistor { a: 1, b: 2, ohms: 470.0 },
             Dev::Led { a: 2, k: 0, color: LedColor::Red, burnt: false },
@@ -539,7 +572,7 @@ mod tests {
 
     #[test]
     fn an_led_straight_on_a_battery_burns_out() {
-        let c = Circuit { nodes: 2, ground: 0, vhigh: Some(9.0), devs: vec![
+        let c = Circuit { nodes: 2, ground: 0, devs: vec![
             Dev::Battery { p: 1, n: 0, volts: 9.0 },
             Dev::Led { a: 1, k: 0, color: LedColor::Red, burnt: false },
         ]};
@@ -551,7 +584,7 @@ mod tests {
     #[test]
     fn a_capacitor_reaches_63_percent_after_one_time_constant() {
         // 10 k and 100 µF: one second.
-        let c = Circuit { nodes: 3, ground: 0, vhigh: Some(9.0), devs: vec![
+        let c = Circuit { nodes: 3, ground: 0, devs: vec![
             Dev::Battery { p: 1, n: 0, volts: 9.0 },
             Dev::Resistor { a: 1, b: 2, ohms: 10_000.0 },
             Dev::Capacitor { a: 2, b: 0, farads: 100e-6 },
@@ -564,7 +597,7 @@ mod tests {
     #[test]
     fn a_small_base_current_switches_a_large_collector_current() {
         // 1 plus, 2 base, 3 LED cathode, 4 collector, 5 switch to base.
-        let mut c = Circuit { nodes: 6, ground: 0, vhigh: Some(9.0), devs: vec![
+        let mut c = Circuit { nodes: 6, ground: 0, devs: vec![
             Dev::Battery { p: 1, n: 0, volts: 9.0 },
             Dev::Led { a: 1, k: 3, color: LedColor::Red, burnt: false },
             Dev::Resistor { a: 3, b: 4, ohms: 470.0 },
@@ -584,7 +617,7 @@ mod tests {
     fn two_transistors_take_turns_and_blink() {
         // 1 plus; Q1: collector 2, base 3; Q2: collector 4, base 5;
         // LED cathodes 6 and 7.
-        let c = Circuit { nodes: 8, ground: 0, vhigh: Some(9.0), devs: vec![
+        let c = Circuit { nodes: 8, ground: 0, devs: vec![
             Dev::Battery { p: 1, n: 0, volts: 9.0 },
             Dev::Led { a: 1, k: 6, color: LedColor::Red, burnt: false },
             Dev::Resistor { a: 6, b: 2, ohms: 470.0 },
