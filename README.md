@@ -10,9 +10,9 @@ Put batteries, resistors, capacitors, LEDs, switches and transistors on a
 grid, wire them up and power on. Then move on to logic chips: gates, a
 clock, a counter, a digit display and the 555 timer.
 
-Every voltage and current is worked out as you watch: wires glow green
-with voltage, LEDs light up with their current, and an LED with no
-resistor burns out. Challenges teach one idea at a time, and each one
+Every voltage and current is worked out as you watch. Wires glow green
+with voltage and turn to double lines where current flows. LEDs light
+up with their current, and an LED with no resistor burns out. Challenges teach one idea at a time, and each one
 ticks itself off when your circuit works.
 
 The panel on the right names what the cursor is on, down to the pin, and
@@ -21,7 +21,7 @@ what it is doing.
 Part of the [Fe₂O₃ suite](https://isene.github.io/fe2o3/). Built on
 [crust](https://github.com/isene/crust).
 
-![A two-transistor blinker running, the third challenge done](img/screenshot.png)
+![A two-transistor blinker: the lit LED's whole loop in double lines, the cursor on the wire after it](img/screenshot.png)
 
 ## The challenges
 
@@ -89,9 +89,14 @@ high above 60% of the chip's voltage and low below 40%.
 Real parts are never exactly their marked value, so each one is off by up
 to 1%. That is also what lets a blinker pick a side and start.
 
+A wire's colour shows its voltage, so the wire after a lit LED is gray:
+the LED and its resistor have used up the battery's 9 volts. The same
+current still flows through it back to the battery, and its double lines
+show that.
+
 The solver runs only while the power is on and something is still
-changing. A circuit that has settled costs nothing. A blinking one costs
-about 16 ms of processor time a second, and the running stopwatch about 5.
+changing. A circuit that has settled costs nothing. A blinking circuit or
+the running stopwatch costs about 16 to 18 ms of processor time a second.
 
 ## Install
 

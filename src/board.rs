@@ -458,6 +458,57 @@ impl Board {
         }
     }
 
+    /// Which wire and pin cells carry more than `min` amps. `into` holds
+    /// the amps each pin cell pushes into its wire. Bit 1: the cell carries
+    /// current (for a crossing, its up-down wire); bit 2: a crossing's
+    /// left-right wire does.
+    pub fn carrying(&self, into: &HashMap<(i32, i32), f64>, min: f64) -> HashMap<(i32, i32), u8> {
+        // A point is a cell, and for a crossing which of its two wires.
+        let point = |at: (i32, i32), dir: u8| (at, crossing(self.mask(at).unwrap_or(0)) && (dir == E || dir == W));
+        let mut parent: HashMap<((i32, i32), bool), Option<((i32, i32), bool)>> = HashMap::new();
+        let mut carry = HashMap::new();
+        for (&at, cell) in &self.cells {
+            if matches!(cell, Cell::Body(_)) { continue; }
+            let m = self.mask(at).unwrap_or(0);
+            let starts = if crossing(m) { vec![(at, false), (at, true)] } else { vec![(at, false)] };
+            for start in starts {
+                if parent.contains_key(&start) { continue; }
+                // Walk this wire, then add up from the far ends back: the
+                // current through each step is all that joins beyond it.
+                parent.insert(start, None);
+                let mut order = vec![start];
+                let mut k = 0;
+                while k < order.len() {
+                    let (at, across) = order[k];
+                    k += 1;
+                    let m = self.mask(at).unwrap_or(0);
+                    let dirs = if !crossing(m) { [N, E, S, W] } else if across { [E, W, 0, 0] } else { [N, S, 0, 0] };
+                    for d in dirs.into_iter().filter(|&d| d != 0 && m & d != 0) {
+                        let (dx, dy) = offset(d);
+                        let nb = (at.0 + dx, at.1 + dy);
+                        if self.mask(nb).is_some_and(|nm| nm & opposite(d) != 0) {
+                            let next = point(nb, opposite(d));
+                            if !parent.contains_key(&next) {
+                                parent.insert(next, Some((at, across)));
+                                order.push(next);
+                            }
+                        }
+                    }
+                }
+                let mut sum: HashMap<((i32, i32), bool), f64> = HashMap::new();
+                for &pt in order.iter().rev() {
+                    let amps = sum.get(&pt).copied().unwrap_or(0.0) + if pt.1 { 0.0 } else { into.get(&pt.0).copied().unwrap_or(0.0) };
+                    let Some(Some(up)) = parent.get(&pt).copied() else { continue };
+                    if amps.abs() > min {
+                        for (c, across) in [pt, up] { *carry.entry(c).or_insert(0) |= if across { 2 } else { 1 }; }
+                    }
+                    *sum.entry(up).or_insert(0.0) += amps;
+                }
+            }
+        }
+        carry
+    }
+
     pub fn to_text(&self) -> String {
         let mut out = String::new();
         for p in self.parts.iter().flatten() {
@@ -615,6 +666,34 @@ mod tests {
         assert!(b.place(Part::new(Kind::Resistor, 2, 3)).is_none(), "the display's body is taken");
         let back = Board::from_text(&b.to_text());
         assert_eq!(back.parts.iter().flatten().next().map(|p| p.kind), Some(Kind::Display));
+    }
+
+    /// Lay wire from `at` along `moves` (U, D, L, R).
+    fn lay(b: &mut Board, mut at: (i32, i32), moves: &str) {
+        for c in moves.chars() {
+            let dir = match c { 'U' => N, 'D' => S, 'L' => W, _ => E };
+            assert!(b.wire(at, dir), "wire from {at:?} toward {c}");
+            let (dx, dy) = offset(dir);
+            at = (at.0 + dx, at.1 + dy);
+        }
+    }
+
+    #[test]
+    fn current_follows_the_loop_and_skips_dead_ends_and_crossing_wires() {
+        let mut b = Board::default();
+        let mut battery = Part::new(Kind::Battery, 0, 5);
+        battery.orient = 2; // + (1,4), − (1,6)
+        b.place(battery).unwrap();
+        b.place(Part::new(Kind::Resistor, 5, 2)).unwrap(); // (4,2) and (8,2)
+        lay(&mut b, (1, 4), "UURRR");
+        lay(&mut b, (8, 2), &format!("R{}{}UU", "D".repeat(6), "L".repeat(8)));
+        lay(&mut b, (2, 2), "UU"); // a dead end off the + wire
+        lay(&mut b, (7, 5), "RRRR"); // a loose wire crossing the way back at (9,5)
+        let into = HashMap::from([((1, 4), 0.01), ((4, 2), -0.01), ((8, 2), 0.01), ((1, 6), -0.01)]);
+        let carry = b.carrying(&into, 1e-5);
+        for at in [(1, 3), (2, 2), (4, 2), (9, 8), (1, 6)] { assert_eq!(carry.get(&at), Some(&1), "{at:?} carries"); }
+        for at in [(2, 1), (2, 0), (8, 5), (10, 5)] { assert!(!carry.contains_key(&at), "{at:?} carries nothing"); }
+        assert_eq!(carry.get(&(9, 5)), Some(&1), "only the up-down wire of the crossing carries");
     }
 
     #[test]

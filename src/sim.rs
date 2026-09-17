@@ -319,6 +319,45 @@ impl Sim {
         changed
     }
 
+    /// The amps each device pushes into each node it touches, as (device,
+    /// node, amps). Negative where current leaves the node into the device.
+    pub fn flows(&self, c: &Circuit) -> Vec<(usize, usize, f64)> {
+        let v = &self.v;
+        let mut out = Vec::new();
+        for (di, d) in c.devs.iter().enumerate() {
+            let i = self.current[di];
+            match *d {
+                Dev::Battery { p, n, .. } => out.extend([(di, p, i), (di, n, -i)]),
+                Dev::Resistor { a, b, .. } | Dev::Capacitor { a, b, .. } | Dev::Switch { a, b, .. } | Dev::Led { a, k: b, .. } => {
+                    out.extend([(di, a, -i), (di, b, i)]);
+                }
+                Dev::Npn { c: col, b, e } => out.extend([(di, col, -i), (di, b, -self.base[di]), (di, e, i + self.base[di])]),
+                _ => {
+                    let (Some((plus, minus)), l) = (d.supply(), self.logic[di]) else { continue };
+                    if !l.on { continue; }
+                    // An output, or the 555's discharge, joined through `ohms` to `to`.
+                    let mut push = |node: usize, to: usize, ohms: f64| {
+                        let amps = (v[to] - v[node]) / ohms;
+                        out.extend([(di, node, amps), (di, to, -amps)]);
+                    };
+                    let rail = |high: bool| if high { plus } else { minus };
+                    match *d {
+                        Dev::Gate { q, .. } | Dev::Clock { q, .. } => push(q, rail(l.out[0]), OUT_R),
+                        Dev::Counter { q, .. } => {
+                            for (k, &node) in q.iter().enumerate() { push(node, rail(l.out[k]), OUT_R); }
+                        }
+                        Dev::Timer { dis, out: o, .. } => {
+                            push(o, rail(l.out[0]), OUT_R);
+                            if !l.out[0] { push(dis, minus, DIS_R); }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Currents from the settled voltages, capacitor memory, burnt LEDs.
     fn measure(&mut self, c: &Circuit, dt: f64) {
         let v = &self.v;
@@ -481,6 +520,26 @@ mod tests {
         let s = run(&c, 0.01);
         assert!(!s.logic[1].on && s.v[2].abs() < 1e-3, "unpowered output {}", s.v[2]);
         assert!(s.current[0].abs() < 1e-6, "the battery gives nothing: {}", s.current[0]);
+    }
+
+    #[test]
+    fn the_currents_into_every_node_add_up_to_zero() {
+        // 1 plus, 2 LED anode, 3 collector, 4 base, 5 gate output.
+        let c = Circuit { nodes: 6, ground: 0, devs: vec![
+            Dev::Battery { p: 1, n: 0, volts: 9.0 },
+            Dev::Resistor { a: 1, b: 2, ohms: 470.0 },
+            Dev::Led { a: 2, k: 3, color: LedColor::Red, burnt: false },
+            Dev::Npn { c: 3, b: 4, e: 0 },
+            Dev::Resistor { a: 5, b: 4, ohms: 10_000.0 },
+            Dev::Gate { gate: Gate::And, a: 1, b: 1, q: 5, plus: 1, minus: 0 },
+        ]};
+        let s = run(&c, 0.05);
+        assert!(s.current[2] > 0.01, "the LED is on: {}", s.current[2]);
+        let mut sum = [0.0; 6];
+        for (_, node, amps) in s.flows(&c) { sum[node] += amps; }
+        for (node, total) in sum.iter().enumerate().skip(1) {
+            assert!(total.abs() < 1e-5, "node {node} is off by {total} A");
+        }
     }
 
     #[test]

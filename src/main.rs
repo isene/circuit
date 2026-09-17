@@ -10,7 +10,7 @@ mod board;
 mod lessons;
 mod sim;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -29,6 +29,8 @@ const TICK_MS: u64 = 100;
 /// A node that moves less than this in a whole tick has settled.
 const SETTLED: f64 = 1e-6;
 const TRACE_N: usize = 36;
+/// A wire carrying more than this many amps is drawn with double lines.
+const CARRY_MIN: f64 = 1e-5;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -89,9 +91,11 @@ struct App {
     shown: [String; 3],
     /// The board rows on screen; only rows that differ are written.
     rows: Vec<String>,
-    /// Wire colours and LED brightness as last drawn. While a circuit
-    /// runs, the board is only rebuilt when one of them changes.
+    /// Wire colours, LED brightness and currents as last drawn. While a
+    /// circuit runs, the board is only rebuilt when one of them changes.
     look: Vec<u8>,
+    /// Wire and pin cells carrying current, as last drawn.
+    carry: HashMap<(i32, i32), u8>,
     /// A key was pressed: the board must be rebuilt.
     dirty: bool,
     /// A pressed button and when it lets go.
@@ -110,7 +114,7 @@ impl App {
             net, sim: None, steady: true, last: Instant::now(), trace: VecDeque::new(),
             progress: Progress::default(),
             done: (0..=LESSONS.len()).map(|i| done.split_whitespace().any(|d| d == i.to_string())).collect(),
-            note: None, reset_armed: false, shown: Default::default(), rows: Vec::new(), look: Vec::new(), dirty: true,
+            note: None, reset_armed: false, shown: Default::default(), rows: Vec::new(), look: Vec::new(), carry: HashMap::new(), dirty: true,
             release: None,
         };
         app.changed();
@@ -444,6 +448,7 @@ impl App {
         }
         let look = self.look();
         if self.dirty || look != self.look {
+            self.carry = self.carrying();
             let lines = self.board_lines(bw, bh);
             if self.rows.len() != lines.len() { self.rows = vec![String::new(); lines.len()]; }
             let mut frame = String::new();
@@ -475,7 +480,7 @@ impl App {
     }
 
     /// Everything on the board that the solver can change: each node's
-    /// wire colour and each LED's brightness step.
+    /// wire colour, each LED's brightness step, and which parts carry current.
     fn look(&self) -> Vec<u8> {
         let Some(sim) = self.sim.as_ref().filter(|_| self.power) else { return Vec::new() };
         let vmax = self.vmax();
@@ -484,6 +489,7 @@ impl App {
             if let Some(part) = self.board.part(p).filter(|x| x.kind == Kind::Led) {
                 out.push(if part.burnt { 255 } else { led_color(part.color, (sim.current[d] / LED_FULL).clamp(0.0, 1.0)) });
             }
+            out.push((sim.current[d].abs() > CARRY_MIN) as u8 | ((sim.base[d].abs() > CARRY_MIN) as u8) << 1);
             let l = sim.logic[d];
             out.push(l.out.iter().enumerate().fold(l.on as u8, |acc, (k, &b)| acc | (b as u8) << (k + 1)));
             out.push(l.value);
@@ -553,15 +559,40 @@ impl App {
         }).collect()
     }
 
-    /// One cell: character, colour, background, bold.
+    /// Wire and pin cells carrying current, as `Board::carrying` marks them.
+    fn carrying(&self) -> HashMap<(i32, i32), u8> {
+        let Some(sim) = self.sim.as_ref().filter(|_| self.power) else { return HashMap::new() };
+        let mut flow: HashMap<(usize, usize), f64> = HashMap::new();
+        for (d, node, amps) in sim.flows(&self.net.circuit) { *flow.entry((d, node)).or_insert(0.0) += amps; }
+        let mut into = HashMap::new();
+        for (d, &i) in self.net.dev_part.iter().enumerate() {
+            let Some(p) = self.board.part(i) else { continue };
+            for at in p.pins() {
+                let amps = self.net.node_of.get(&at).and_then(|&node| flow.get(&(d, node)));
+                if let Some(&amps) = amps { into.insert(at, amps); }
+            }
+        }
+        self.board.carrying(&into, CARRY_MIN)
+    }
+
+    /// One cell: character, colour, background, bold. A wire carrying
+    /// current is drawn with double lines.
     fn glyph(&self, at: (i32, i32), vmax: f64) -> (char, u8, Option<u8>, bool) {
         const BOX: [char; 16] = ['•', '╵', '╶', '└', '╷', '│', '┌', '├', '╴', '┘', '─', '┴', '┐', '┤', '┬', '┼'];
+        const DOUBLE: [char; 16] = ['•', '║', '═', '╚', '║', '║', '╔', '╠', '═', '╝', '═', '╩', '╗', '╣', '╦', '╬'];
         let wire_color = || self.volt_color(at, vmax);
+        let lines = |mask: u8, pin: bool| {
+            let flows = self.carry.get(&at).copied().unwrap_or(0);
+            if !pin && board::crossing(mask) {
+                // Up-down wire, left-right wire, or both carrying.
+                ['┼', '╫', '╪', '╬'][flows as usize & 3]
+            } else if flows != 0 { DOUBLE[mask as usize & 15] } else { BOX[mask as usize & 15] }
+        };
         match self.board.cells.get(&at) {
             // Spaces share the dots' colour, so an empty row needs one colour code, not one per cell.
             None => (if at.0 % 2 == 0 && at.1 % 2 == 0 { '·' } else { ' ' }, 237, None, false),
-            Some(Cell::Wire(m)) if *m & JOIN != 0 && *m & 15 == 15 => ('╋', wire_color(), None, true),
-            Some(Cell::Wire(m)) => (BOX[*m as usize & 15], wire_color(), None, false),
+            Some(Cell::Wire(m)) if *m & JOIN != 0 && *m & 15 == 15 => ('●', wire_color(), None, true),
+            Some(Cell::Wire(m)) => (lines(*m, false), wire_color(), None, false),
             Some(Cell::Pin(i, k, m)) => {
                 let Some(p) = self.board.part(*i) else { return ('?', 196, None, false) };
                 if let Some(plus) = p.kind.power_pin() {
@@ -575,7 +606,7 @@ impl App {
                     Kind::Not => (['a', 'q'][*k], wire_color(), None, true),
                     Kind::Clock => ('q', wire_color(), None, true),
                     kind if kind.gate().is_some() => (['a', 'b', 'q'][*k], wire_color(), None, true),
-                    _ => (BOX[(*m | p.inward(at)) as usize & 15], wire_color(), None, false),
+                    _ => (lines(*m | p.inward(at), true), wire_color(), None, false),
                 }
             }
             Some(Cell::Body(i)) => {
@@ -731,7 +762,10 @@ impl App {
             let (what, line) = match (self.board.cells.get(&self.cur), sim, self.net.node_of.get(&self.cur)) {
                 (Some(Cell::Wire(m)), _, _) if board::crossing(*m) => ("Crossing wires", "They do not touch. . joins them.".into()),
                 (Some(Cell::Wire(m)), _, _) if *m & 15 == 15 => ("Joined wires", ". separates them.".into()),
-                (Some(Cell::Wire(_)), Some(s), Some(&n)) => ("Wire", format!("At {}", volts(s.v[n]))),
+                (Some(Cell::Wire(_)), Some(s), Some(&n)) => {
+                    let carrying = if self.carry.contains_key(&self.cur) { ", carrying current" } else { ", no current" };
+                    ("Wire", format!("At {}{carrying}", volts(s.v[n])))
+                }
                 (Some(Cell::Wire(_)), _, _) => ("Wire", "x deletes it.".into()),
                 _ if self.pen => ("Empty", "Move to draw a wire. w or Esc stops.".into()),
                 _ => ("Empty", "Press 1 to 6 or a to add a part here, or w to draw a wire.".into()),
@@ -865,7 +899,8 @@ const HELP: &str = "
   q                  quit (the board is kept)
 
   Wires glow green with voltage, brighter for higher,
-  and red below zero. LEDs glow with their current.
+  and red below zero. A wire carrying current has
+  double lines. LEDs glow with their current.
   Every chip needs its + and − wired to a battery.
   An input reads high above 60% of that voltage
   and low below 40%.

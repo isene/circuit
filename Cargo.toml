@@ -1,6 +1,6 @@
 [package]
 name = "circuit"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 authors = ["Geir Isene <g@isene.com>"]
 description = "Build circuits in the terminal and watch them work: batteries, resistors, capacitors, LEDs, switches and transistors, with challenges that teach. Built on crust."
