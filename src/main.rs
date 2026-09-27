@@ -280,6 +280,7 @@ impl App {
                 }
             }
             "?" => self.help(),
+            "C-A" => self.claude(),
             "RESIZE" => { self.shown = Default::default(); self.rows.clear(); }
             _ => {}
         }
@@ -393,6 +394,34 @@ impl App {
         p.set_text(HELP);
         p.full_refresh();
         let _ = Input::getchr(None);
+        Crust::clear_screen();
+        self.shown = Default::default();
+        self.rows.clear();
+    }
+
+    /// Ctrl+A, as in every Fe2O3 app: a Claude session about the board,
+    /// every part with what it reads, and the challenge.
+    fn claude(&mut self) {
+        let mut ctx = format!(
+            "{}\n\nThe board as drawn:\n{}\n\nThe side panel:\n{}\n\nEach part, with what it reads{}:\n",
+            crust::strip_ansi(&self.shown[0]),
+            self.rows.iter().map(|r| crust::strip_ansi(r).trim_end().to_string())
+                .filter(|r| r.chars().any(|c| c != '·' && c != ' ')).collect::<Vec<_>>().join("\n"),
+            crust::strip_ansi(&self.shown[2]),
+            if self.power { "" } else { " (the power is off)" },
+        );
+        let cur = self.cur;
+        let spots: Vec<(i32, i32)> = self.board.parts.iter().flatten().filter_map(|p| p.body().first().copied()).collect();
+        for at in spots {
+            self.cur = at;
+            let (what, lines) = self.describe();
+            ctx.push_str(&format!("- {what} at column {}, row {}: {}\n", at.0, at.1, lines.join(" ")));
+        }
+        self.cur = cur;
+        let intro = "I am in circuit, my electronics bench app: I wire up parts and watch the voltages.";
+        if !crust::claude_session("Circuit", intro, &ctx) {
+            self.note = Some("claude is not on the PATH".into());
+        }
         Crust::clear_screen();
         self.shown = Default::default();
         self.rows.clear();
@@ -894,6 +923,7 @@ const HELP: &str = "
   Space              flip a switch, press a button
   r                  replace a burnt-out LED
   p                  power on or off
+  Ctrl+A             ask Claude about the board
   n N                next or previous challenge
   R R                put the board back to its start
   q                  quit (the board is kept)

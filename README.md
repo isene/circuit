@@ -63,6 +63,7 @@ anything else. Every board is kept in `~/.circuit/` when you quit.
 | `Space` | flip a switch, press a button |
 | `r` | replace a burnt-out LED |
 | `p` | power on or off |
+| `Ctrl+A` | a Claude session about the board, each part and the challenge (`claude` on the PATH); `/exit` comes back |
 | `n` `N` | next or previous challenge |
 | `R` `R` | put the board back to its start |
 | `?` | every key |
