@@ -386,12 +386,13 @@ impl App {
 
     fn help(&mut self) {
         let (cols, rows) = Crust::terminal_size();
-        let lines = HELP.lines().count() as u16 + 2;
+        let help = crust::key_help(HELP);
+        let lines = help.lines().count() as u16 + 2;
         let (w, h) = (64.min(cols.saturating_sub(4)), lines.min(rows.saturating_sub(2)));
         let mut p = Pane::new((cols - w) / 2 + 1, (rows - h) / 2 + 1, w, h, 252, 235);
         p.border = true;
         p.scroll = false;
-        p.set_text(HELP);
+        p.set_text(&help);
         p.full_refresh();
         let _ = Input::getchr(None);
         Crust::clear_screen();
